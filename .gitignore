@@ -1,0 +1,23 @@
+*.pyc
+
+ckpt/
+vis/
+log/
+pretrained/
+
+.ipynb_checkpoints
+
+ADE_val*.jpg
+ADE_val*.png
+
+.idea/
+
+
+# 忽略模型检查点文件
+ckpt/
+
+# 忽略原始图像文件夹
+RGB_images/
+
+# 忽略保存结果
+save_results/

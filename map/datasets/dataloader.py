@@ -1,0 +1,388 @@
+
+from torch.utils.data import Dataset
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn.functional as F
+import random
+import habitat
+from habitat.config.default import get_config
+import habitat.utils.visualizations.maps as map_util
+import datasets.util.utils as utils
+import os
+import gzip
+import json
+from datasets.util import viz_utils, map_utils
+
+
+# 用于eval, train
+class HabitatDataOffline(Dataset):
+
+    def __init__(self, options, config_file, img_segm=False, finetune=False):
+        print("     [zhjd-debug] config_file:", config_file)
+        config = get_config(config_file)
+        self.config = config
+        
+        self.img_segm = img_segm
+        self.finetune = finetune # whether we are running a finetuning active job
+
+        self.episodes_file_list = []
+        self.episodes_file_list += self.collect_stored_episodes(options, split=config.DATASET.SPLIT)
+        # 根据configs/my_objectnav_mp3d_val.yaml，  config.DATASET.SPLIT = val
+        
+        if options.dataset_percentage < 1: # Randomly choose the subset of the dataset to be used
+            random.shuffle(self.episodes_file_list)
+            self.episodes_file_list = self.episodes_file_list[ :int(len(self.episodes_file_list)*options.dataset_percentage) ]
+        self.number_of_episodes = len(self.episodes_file_list)
+
+        self.object_labels = options.n_object_classes
+
+        if self.img_segm:
+            self.episodes_imgSegm_dir = options.stored_imgSegm_episodes_dir
+            self.episodes_dir = options.stored_episodes_dir
+
+
+    def collect_stored_episodes(self, options, split):
+        print("     [zhjd-debug] options.stored_episodes_dir:", options.stored_episodes_dir)
+        episodes_dir = options.stored_episodes_dir + split + "/"
+        print("     [zhjd-debug] episodes_dir:", episodes_dir)
+        episodes_file_list = []
+        # 列出 episodes_dir 目录下的所有文件和文件夹名（不加路径）。
+        _scenes_dir = os.listdir(episodes_dir)
+        # 含义：过滤出 _scenes_dir 中的子文件夹名称，排除文件。
+        scenes_dir = [ x for x in _scenes_dir if os.path.isdir(episodes_dir+x) ]
+        # 遍历每个场景文件夹下的 episode 文件
+        for scene in scenes_dir:
+            for fil in os.listdir(episodes_dir+scene+"/"):
+                episodes_file_list.append(episodes_dir+scene+"/"+fil)
+        print("     [zhjd-debug] episodes_file_list:", episodes_file_list)
+        return episodes_file_list
+
+
+    def __len__(self):
+        return self.number_of_episodes
+
+
+    def __getitem__(self, idx):
+        # Load from the pre-stored objnav training episodes
+        # 获取第idx个episode的文件路径
+        ep_file = self.episodes_file_list[idx]
+        # 加载.npy或.npz文件
+        ep = np.load(ep_file)
+
+        abs_pose = ep['abs_pose']   # 绝对位姿（T x 3或T x 6）
+        ego_grid_crops_spatial = torch.from_numpy(ep['ego_grid_crops_spatial']) # 自我中心的空间网格
+        step_ego_grid_crops_spatial = torch.from_numpy(ep['step_ego_grid_crops_spatial'])
+        gt_grid_crops_spatial = torch.from_numpy(ep['gt_grid_crops_spatial'])
+        gt_grid_crops_objects = torch.from_numpy(ep['gt_grid_crops_objects'])
+        step_ego_grid_27 = torch.from_numpy(ep['step_ego_grid_27'])
+
+        # 将绝对位姿转换为相对于初始位姿的相对位姿。
+        ### Transform abs_pose to rel_pose
+        rel_pose = []
+        for i in range(abs_pose.shape[0]):
+            rel_pose.append(utils.get_rel_pose(pos2=abs_pose[i,:], pos1=abs_pose[0,:]))
+
+        # 构建返回字典
+        item = {}
+        item['pose'] = torch.from_numpy(np.asarray(rel_pose)).float()
+        item['abs_pose'] = torch.from_numpy(abs_pose).float()
+        item['ego_grid_crops_spatial'] = ego_grid_crops_spatial # already torch.float32
+        item['step_ego_grid_crops_spatial'] = step_ego_grid_crops_spatial
+        item['gt_grid_crops_spatial'] = gt_grid_crops_spatial # Long tensor, int64
+        item['gt_grid_crops_objects'] = gt_grid_crops_objects # Long tensor, int64
+        item['step_ego_grid_27'] = step_ego_grid_27 # Long tensor, int64
+
+
+        if self.img_segm:
+
+            if self.finetune:
+                item['images'] = torch.from_numpy(ep['images']) # T x 3 x H x W # images are already pre-processed
+                item['gt_segm'] = torch.from_numpy(ep['ssegs']).type(torch.int64) # T x 1 x H x W
+                item['depth_imgs'] = torch.from_numpy(ep['depth_imgs']) # T x 1 x H x W
+            else:
+                ep_file_imgSegm = ep_file.replace(self.episodes_dir, self.episodes_imgSegm_dir)
+                ep_imgSegm = np.load(ep_file_imgSegm)
+                pred_ego_crops_sseg = torch.from_numpy(ep_imgSegm['pred_ego_crops_sseg'])
+                item['pred_ego_crops_sseg'] = pred_ego_crops_sseg
+
+        return item
+
+
+# 用于图像分割网络的训练
+# Dataloader only for training the img segmentation (i.e. loading only relevant data) that inherits from HabitatDataOffline
+class HabitatDataImgSegm(HabitatDataOffline):
+
+    def __init__(self, options, config_file, store=False):
+        super().__init__(options, config_file, img_segm=False)
+        self.store = store
+
+
+    def __getitem__(self, idx):
+        # Load from the pre-stored objnav training episodes
+        ep_file = self.episodes_file_list[idx]
+        ep = np.load(ep_file)
+
+        item={}
+        item['images'] = torch.from_numpy(ep['images']) # T x 3 x H x W # images are already pre-processed
+        item['gt_segm'] = torch.from_numpy(ep['ssegs']).type(torch.int64) # T x 1 x H x W
+        item['depth_imgs'] = torch.from_numpy(ep['depth_imgs'])
+
+        if self.store:
+            item['filename'] = ep_file
+
+        return item
+
+# 用于 train 和 NavTest， 以及生成本地NPZ
+## Loads the simulator and episodes separately to enable per_scene collection of data
+class HabitatDataScene(Dataset):
+
+    def __init__(self, options, config_file, scene_id, existing_episode_list=[]):
+        self.scene_id = scene_id
+
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        cfg = habitat.get_config(config_file)
+        print("     [zhjd-debug] config_file:", config_file)
+        cfg.defrost()
+        cfg.SIMULATOR.SCENE = options.root_path + options.scenes_dir + "mp3d/" + scene_id + '/' + scene_id + '.glb' # scene_dataset_path 用到了吗？
+        print("     [zhjd-debug] cfg.SIMULATOR.SCENE:", cfg.SIMULATOR.SCENE)
+        #cfg.SIMULATOR.DEPTH_SENSOR.NORMALIZE_DEPTH = False
+        cfg.SIMULATOR.TURN_ANGLE = options.turn_angle
+        cfg.SIMULATOR.FORWARD_STEP_SIZE = options.forward_step_size
+        cfg.freeze()
+
+        self.sim = habitat.sims.make_sim("Sim-v0", config=cfg.SIMULATOR)
+
+        seed = 0
+        self.sim.seed(seed)
+
+        ## Load episodes of scene_id
+        ep_file_path = options.root_path + options.episodes_root + cfg.DATASET.SPLIT + "/content/" + self.scene_id + ".json.gz"
+        print("     [zhjd-debug] ep_file_path:", ep_file_path)
+        #  /home/robotlab/dataset/test_for_object_goal_navigation/hard/v5/test/content/8194nk5LbLH.json.gz
+        with gzip.open(ep_file_path, "rt") as fp:
+            self.scene_data = json.load(fp)
+        self.number_of_episodes = len(self.scene_data["episodes"])
+
+        self.success_distance = cfg.TASK.SUCCESS.SUCCESS_DISTANCE
+
+        ## Dataloader params
+        self.hfov = float(cfg.SIMULATOR.DEPTH_SENSOR.HFOV) * np.pi / 180.
+        self.cfg_norm_depth = cfg.SIMULATOR.DEPTH_SENSOR.NORMALIZE_DEPTH
+        print("     [zhjd-debug] self.cfg_norm_depth:", self.cfg_norm_depth)  # 得到的是TRUE
+        self.max_depth = cfg.SIMULATOR.DEPTH_SENSOR.MAX_DEPTH
+        self.min_depth = cfg.SIMULATOR.DEPTH_SENSOR.MIN_DEPTH
+        self.spatial_labels = options.n_spatial_classes
+        self.object_labels = options.n_object_classes
+        self.grid_dim = (options.grid_dim, options.grid_dim)
+        self.cell_size = options.cell_size
+        self.crop_size = (options.crop_size, options.crop_size)
+        self.img_size = (options.img_size, options.img_size)
+        self.img_segm_size = (options.img_segm_size, options.img_segm_size)
+        self.normalize = True
+        self.pixFormat = 'NCHW'
+        self.preprocessed_scenes_dir = options.root_path + options.scenes_dir + "mp3d_scene_pclouds/"
+
+        self.episode_len = options.episode_len
+        self.truncate_ep = options.truncate_ep
+
+         # get point cloud and labels of scene
+        self.pcloud, self.label_seq_spatial, self.label_seq_objects = utils.load_scene_pcloud(self.preprocessed_scenes_dir,
+                                                                                                    self.scene_id, self.object_labels)
+        if len(existing_episode_list)!=0:
+            self.existing_episode_list = [ int(x.split('_')[2]) for x in existing_episode_list ]
+        else:
+            self.existing_episode_list=[]
+
+        self.occ_from_depth = options.occ_from_depth
+        self.occupancy_height_thresh = options.occupancy_height_thresh
+
+        # Build 3D transformation matrices
+        self.xs, self.ys = torch.tensor(np.meshgrid(np.linspace(-1,1,self.img_size[0]), np.linspace(1,-1,self.img_size[1])), device='cuda')
+        self.xs = self.xs.reshape(1,self.img_size[0],self.img_size[1])
+        self.ys = self.ys.reshape(1,self.img_size[0],self.img_size[1])
+        K = np.array([
+            [1 / np.tan(self.hfov / 2.), 0., 0., 0.],
+            [0., 1 / np.tan(self.hfov / 2.), 0., 0.],
+            [0., 0.,  1, 0],
+            [0., 0., 0, 1]])
+        self.inv_K = torch.tensor(np.linalg.inv(K), device='cuda')
+        # create the points2D containing all image coordinates
+        x, y = torch.tensor(np.meshgrid(np.linspace(0, self.img_size[0]-1, self.img_size[0]), np.linspace(0, self.img_size[1]-1, self.img_size[1])), device='cuda')
+        xy_img = torch.vstack((x.reshape(1,self.img_size[0],self.img_size[1]), y.reshape(1,self.img_size[0],self.img_size[1])))
+        points2D_step = xy_img.reshape(2, -1)
+        self.points2D_step = torch.transpose(points2D_step, 0, 1) # Npoints x 2
+        print('[zhjd-localization] 3')
+
+
+    def __len__(self):
+        return self.number_of_episodes
+
+    # 负责在指定场景中执行一个 episode（导航轨迹）并采集图像、深度、语义、位姿和网格投影数据。
+    # 每调用一次 __getitem__(self, idx)：
+    # 1.就会根据 episodes[idx]（来自 JSON.gz）执行一条导航轨迹；
+    # 2.使用 Habitat 模拟器沿 shortest_paths 中的动作逐步前进；
+    # 3.在每一步采集 RGB、Depth、Semantic 图像；
+    # 4.计算对应的 3D 点云、语义投影、ego-grid；
+    # 5.最后打包成一个 Python 字典 item 返回。
+    # 6.生成的数据会保存为 .npz 文件，用于后续训练或评估。
+    def __getitem__(self, idx):
+        print('[zhjd-localization] 1')
+        # 1.Episode 初始化与过滤
+        episode = self.scene_data['episodes'][idx]
+        len_shortest_path = len(episode['shortest_paths'][0])
+        objectgoal = episode['object_category']
+
+        # 如果最短路径太长 (>50步) → 跳过，避免显存/内存爆；
+        if len_shortest_path > 50: # skip that episode to avoid memory issues
+            return None
+        if len_shortest_path < self.episode_len+1:
+            return None
+
+        if idx in self.existing_episode_list:
+            print("Episode", idx, 'already exists!')
+            return None
+
+        # 2.语义标签映射:从场景中读取所有语义对象的 ID 与类别；
+        # 生成 instance → category 的映射字典；
+        scene = self.sim.semantic_annotations()
+        instance_id_to_label_id = {int(obj.id.split("_")[-1]): obj.category.index() for obj in scene.objects}
+        # convert the labels to the reduced set of categories
+        # 然后通过 viz_utils.label_conversion_40_3 / _40_27
+        # 将 Habitat 原始 40 类语义标签映射到：
+        # 3 类：空间栅格（free / obstacle / unknown）
+        # 27 类：ObjectNav 对象语义（椅子、沙发、床、桌子等）。
+        instance_id_to_label_id_3 = instance_id_to_label_id.copy()
+        instance_id_to_label_id_objects = instance_id_to_label_id.copy()
+        for inst_id in instance_id_to_label_id.keys():
+            curr_lbl = instance_id_to_label_id[inst_id]
+            instance_id_to_label_id_3[inst_id] = viz_utils.label_conversion_40_3[curr_lbl]
+            instance_id_to_label_id_objects[inst_id] = viz_utils.label_conversion_40_27[curr_lbl]
+
+        # if truncated, run episode only up to the chosen step start_ind+episode_len
+        # 3.如果启用截断（truncate_ep = True），只取一段连续子轨迹(10步)；
+        if self.truncate_ep:
+            start_ind = random.randint(0, len_shortest_path-self.episode_len-1)
+            episode_extend = start_ind+self.episode_len
+        else:
+            episode_extend = len_shortest_path
+
+        # 4.初始化张量容器
+        # imgs, depth, and ssegs stored here are (128,128) rather than the simulator's self.img_size:(256,256)
+        # because they are going to be used during image segmentation training
+        imgs = torch.zeros((episode_extend, 3, self.img_segm_size[0], self.img_segm_size[1]), dtype=torch.float32, device=self.device)
+        depth_imgs = torch.zeros((episode_extend, 1, self.img_segm_size[0], self.img_segm_size[1]), dtype=torch.float32, device=self.device)
+        ssegs_objects = torch.zeros((episode_extend, 1, self.img_segm_size[0], self.img_segm_size[1]), dtype=torch.float32, device=self.device)
+
+        ssegs_3 = torch.zeros((episode_extend, 1, self.img_size[1], self.img_size[0]), dtype=torch.float32, device=self.device)
+        points2D, local3D, abs_poses, rel_poses, action_seq, agent_height = [], [], [], [], [], []
+
+        # 5.重置模拟器并设定起点
+        self.sim.reset()
+        self.sim.set_agent_state(episode["start_position"], episode["start_rotation"])  #将智能体放到 JSON 里定义的起点；
+        sim_obs = self.sim.get_sensor_observations()    # 每一步都会让所有传感器（RGB/Depth/Semantic）重新渲染；
+        observations = self.sim._sensor_suite.get_observations(sim_obs)
+
+
+        # 6. 主循环：采集每一步数据
+        for i in range(episode_extend):
+            # 6.1 读取当前帧 RGB / Depth / Semantic；
+            img = observations['rgb'][:,:,:3]   # RGB 直接取前三通道。
+            depth_obsv = observations['depth'].permute(2,0,1).unsqueeze(0) # Depth 在 Habitat 中原本是 H×W×1；为了后续的上采样，先变成 NCHW（batch=1、channel=1）：1×1×H×W。
+
+            # 6.2 深度图上采样并反归一化；
+            # 上采样：把深度分辨率统一到 self.img_size（ 256×256 ）。
+            depth = F.interpolate(depth_obsv.clone(), size=self.img_size, mode='nearest')  # nearest：深度是度量值，双线性会引入非物理的“平均”。最近邻能保持每像素实际测量。
+            depth = depth.squeeze(0).permute(1,2,0)
+            # 反归一化：模拟器或数据管线有时把深度归一化到 [0,1]；反归一化把它还原到米（meter），便于后续 3D 投影与导航。
+            if self.cfg_norm_depth:
+                depth = utils.unnormalize_depth(depth, min=self.min_depth, max=self.max_depth)            
+
+            # 6.3 将语义图插值到固定尺寸（ 256×256 ）；
+            semantic = observations['semantic']
+            semantic = F.interpolate(semantic.unsqueeze(0).unsqueeze(0).float(), size=self.img_size, mode='nearest').int()
+            semantic = semantic.squeeze(0).squeeze(0)
+
+            # 6.4 调用 utils.depth_to_3D() 计算每个像素对应的 3D 点坐标；
+            # visual and 3d info
+            imgData = utils.preprocess_img(img, cropSize=self.img_segm_size, pixFormat=self.pixFormat, normalize=self.normalize)
+            # 相机坐标下的 3D 点云
+            local3D_step = utils.depth_to_3D(depth, self.img_size, self.xs, self.ys, self.inv_K)
+
+            # 6.5 将语义 ID 映射到 3类/27类；
+            # 原始 semantic 给的是实例 ID或原始 40 类 ID；需要用场景注释映射到任务使用的类集：
+            ssegData = np.expand_dims(semantic.cpu().numpy(), 0).astype(float) # 1 x H x W
+            # 空间 3 类（自由/障碍/未知）——供占据/可行区域判断；
+            ssegData_3 = np.vectorize(instance_id_to_label_id_3.get)(ssegData.copy()) # convert instance ids to category ids
+            # 物体 27 类——供目标类别定位（如 chair, sofa, bed, …）。
+            ssegData_objects = np.vectorize(instance_id_to_label_id_objects.get)(ssegData.copy()) # convert instance ids to category ids
+
+            # 6.6 计算当前智能体姿态与相对位姿；
+            agent_pose, y_height = utils.get_sim_location(agent_state=self.sim.get_agent_state())
+            # 用于后续：
+            # 把相机系点云投到地面网格（ego-grid / geo-grid）；
+            # 把每一步的地图累加到同一坐标系；
+            # 计算相对位姿（配准旋转/平移）。
+
+            # 6.7 保存图像、深度、语义数据到张量中。
+            imgs[i,:,:,:] = imgData
+            depth_resize = F.interpolate(depth_obsv.clone(), size=self.img_segm_size, mode='nearest')
+            depth_imgs[i,:,:,:] = depth_resize.squeeze(0)
+            ssegs_3[i,:,:,:] = torch.from_numpy(ssegData_3).float()
+            ssegData_resize = F.interpolate(torch.from_numpy(ssegData_objects).unsqueeze(0).float(), size=self.img_segm_size, mode='nearest')
+            ssegs_objects[i,:,:,:] = ssegData_resize.squeeze()
+
+            abs_poses.append(agent_pose)
+            agent_height.append(y_height)
+            points2D.append(self.points2D_step)
+            local3D.append(local3D_step)
+
+            # 相对位姿（对第 0 帧）：get the relative pose with respect to the first pose in the sequence
+            rel = utils.get_rel_pose(pos2=abs_poses[i], pos1=abs_poses[0])
+            rel_poses.append(rel)
+
+            # 6.8 根据预定义动作 ID（如 1=前进，2=左转，3=右转）移动 agent；
+            # explicitly clear observation otherwise they will be kept in memory the whole time
+            observations = None   # 先显式释放，避免每步把旧帧留在显存/内存
+            action_id = episode['shortest_paths'][0][i]  # 作用： （1）在导航网格约束下更新 agent 的位姿（执行动作）； （2）在新位姿渲染所有已启用的传感器（RGB/Depth/Semantic），把帧放到 observations。
+            if action_id==None:
+                break
+            observations = self.sim.step(action_id)
+
+        # 7. 位姿与投影栅格计算
+        # 7.1 执行完 episode 后，代码生成地图相关张量：
+        pose = torch.from_numpy(np.asarray(rel_poses)).float()
+        abs_pose = torch.from_numpy(np.asarray(abs_poses)).float()
+
+        # 7.2 投影 ego-grid：
+        # Create the ground-projected grids
+        if self.occ_from_depth:
+            ego_grid_sseg_3 = map_utils.est_occ_from_depth(local3D, grid_dim=self.grid_dim, cell_size=self.cell_size, 
+                                                    device=self.device, occupancy_height_thresh=self.occupancy_height_thresh)
+        else:
+            ego_grid_sseg_3 = map_utils.ground_projection(self.points2D, local3D, ssegs_3, sseg_labels=self.spatial_labels, grid_dim=self.grid_dim, cell_size=self.cell_size)
+
+        # 7.3 叠加时间步：通过相对位姿将多步投影累计到统一地图坐标。
+        ego_grid_crops_3 = map_utils.crop_grid(grid=ego_grid_sseg_3, crop_size=self.crop_size)
+        step_ego_grid_3 = map_utils.get_acc_proj_grid(ego_grid_sseg_3, pose, abs_pose, self.crop_size, self.cell_size)
+        step_ego_grid_crops_3 = map_utils.crop_grid(grid=step_ego_grid_3, crop_size=self.crop_size)
+        # Get cropped gt
+        gt_grid_crops_spatial = map_utils.get_gt_crops(abs_pose, self.pcloud, self.label_seq_spatial, agent_height,
+                                                            self.grid_dim, self.crop_size, self.cell_size)
+        # 7.4 提取 GT（Ground Truth）。 从离线点云（self.pcloud）中提取真实语义/空间地图作为监督信号。
+        gt_grid_crops_objects = map_utils.get_gt_crops(abs_pose, self.pcloud, self.label_seq_objects, agent_height,
+                                                            self.grid_dim, self.crop_size, self.cell_size)
+
+        item = {}
+        item['images'] = imgs
+        item['depth_imgs'] = depth_imgs
+        item['ssegs'] = ssegs_objects
+        item['episode_id'] = idx
+        item['scene_id'] = self.scene_id
+        item['abs_pose'] = abs_pose
+        item['ego_grid_crops_spatial'] = ego_grid_crops_3
+        item['step_ego_grid_crops_spatial'] = step_ego_grid_crops_3
+        item['gt_grid_crops_spatial'] = gt_grid_crops_spatial
+        item['gt_grid_crops_objects'] = gt_grid_crops_objects
+        return item
