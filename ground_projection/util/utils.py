@@ -4,8 +4,8 @@ import os
 import math
 import torch
 import quaternion
-import datasets.util.viz_utils as viz_utils
-import datasets.util.map_utils as map_utils
+import ground_projection.util.viz_utils as viz_utils
+import ground_projection.util.map_utils as map_utils
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 

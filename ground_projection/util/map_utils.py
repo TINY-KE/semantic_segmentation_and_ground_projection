@@ -1,7 +1,7 @@
 import numpy as np
 import os
 import torch
-from models.semantic_grid import SemanticGrid
+from ground_projection.util.semantic_grid import SemanticGrid
 
 
 def get_acc_proj_grid(ego_grid_sseg, pose, abs_pose, crop_size, cell_size):
@@ -9,9 +9,9 @@ def get_acc_proj_grid(ego_grid_sseg, pose, abs_pose, crop_size, cell_size):
     # sg.sem_grid will hold the accumulated semantic map at the end of the episode (i.e. 1 map per episode)
     sg = SemanticGrid(1, grid_dim, crop_size[0], cell_size, spatial_labels=ego_grid_sseg.shape[1], object_labels=ego_grid_sseg.shape[1])
     # Transform the ground projected egocentric grids to geocentric using relative pose
-    geo_grid_sseg = sg.spatialTransformer(grid=ego_grid_sseg, pose=pose, abs_pose=abs_pose)
+    geo_grid_sseg = sg.mapTransformer(grid=ego_grid_sseg, pose=pose, abs_pose=abs_pose)
     # step_geo_grid contains the map snapshot every time a new observation is added
-    step_geo_grid_sseg = sg.update_proj_grid_bayes(geo_grid=geo_grid_sseg.unsqueeze(0))
+    step_geo_grid_sseg = sg.update_spatial_proj_grid_bayes(geo_grid=geo_grid_sseg.unsqueeze(0))
     # transform the projected grid back to egocentric (step_ego_grid_sseg contains all preceding views at every timestep)
     step_ego_grid_sseg = sg.rotate_map(grid=step_geo_grid_sseg.squeeze(0), rel_pose=pose, abs_pose=abs_pose)
     return step_ego_grid_sseg
@@ -99,6 +99,52 @@ def est_occ_from_depth(local3D, grid_dim, cell_size, device, occupancy_height_th
 
     # ZHJD: 因此ego_grid_occ相同xy处的三个栅格，数值最大的对应的状态是可视化是应该显示的状态
     return ego_grid_occ
+
+
+# 将来自图像的语义分割信息和深度信息，投影到地面网格上，构建一个语义概率地图（semantic grid map）。
+# 参数解释：
+# points2D：每一帧的像素点坐标，形状为 [T, N, 2]，表示图像中每个 3D 点对应的像素位置；
+# local3D：每一帧的三维点坐标（相机坐标系下），形状 [T, N, 3]；
+# sseg：语义分割图，形状 [T, 1, H, W]，每个像素的类别 ID；
+# sseg_labels：语义类别总数（例如 27）；
+# grid_dim：输出网格的尺寸，如 (284, 284)；
+# cell_size：每个网格单元代表的真实世界长度（单位：米）。
+def ground_projection_my(points2D, local3D, sseg, sseg_labels, grid_dim, cell_size):
+    ego_grid_sseg = torch.zeros((sseg.shape[0], sseg_labels, grid_dim[0], grid_dim[1]), dtype=torch.float32, device='cuda')
+    # 逐帧处理每一个时间步。
+    for i in range(sseg.shape[0]): # sequence length
+        # 当前帧的语义分割图；
+        sseg_step = sseg[i,:,:,:].unsqueeze(0) # 1 x 1 x H x W
+        # 当前帧中每个 3D 点对应的像素；
+        points2D_step = points2D[i]
+        # 对应的相机系下的 3D 坐标。
+        local3D_step = local3D[i]
+
+        # 抛弃距离相机太近（< 0.5m）或太远（> 3m）的点；
+        depth = local3D_step[:, 0]
+        valid_inds = torch.nonzero(torch.where((depth < 7) & (depth > 0.5), 1, 0)).squeeze(dim=1)
+        local3D_step = local3D_step[valid_inds, :]
+        points2D_step = points2D_step[valid_inds, :]
+
+        # 抛弃 y 轴高度 > 1 米的点（如天花板、吊灯等）；
+        h = local3D_step[:, 2]
+        valid_inds = torch.nonzero(torch.where(h < 1, 1, 0)).squeeze(dim=1)
+        local3D_step = local3D_step[valid_inds, :]
+        points2D_step = points2D_step[valid_inds, :]
+
+        # 将 (x, z) 坐标映射到网格坐标 (i, j)。
+        # FIXME: map_coords的维度为 [H*W, 2]
+        map_coords = discretize_coords(x=local3D_step[:,0], z=local3D_step[:,1], grid_dim=grid_dim, cell_size=cell_size)
+
+        # 将每个像素的语义标签统计到对应网格格子中。 label_pooling() 的作用是统计每个格子中出现的语义标签种类，生成类别概率分布。
+        # FIXME: grid_sseg的维度为 [C, H, W]
+        grid_sseg = label_pooling(sseg_step, points2D_step, map_coords, sseg_labels, grid_dim)
+        grid_sseg = grid_sseg.unsqueeze(0)
+
+        ego_grid_sseg[i,:,:,:] = grid_sseg
+
+    return ego_grid_sseg
+
 
 # 将来自图像的语义分割信息和深度信息，投影到地面网格上，构建一个语义概率地图（semantic grid map）。
 # 参数解释：

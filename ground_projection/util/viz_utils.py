@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 import math
 import torch
 from PIL import Image
-from habitat_sim.utils.common import d3_40_colors_rgb
-import datasets.util.map_utils as map_utils
+# from habitat_sim.utils.common import d3_40_colors_rgb
+import ground_projection.util.map_utils as map_utils
 
 '''
 MP3D original semantic labels and reduced set correspondence
@@ -155,35 +155,35 @@ def write_tensor_imgSegm(img, savepath, name, t=None):
         cv2.imwrite(im_path, vis_img[:,:,::-1])
 
 
-def display_sample(rgb_obs, depth_obs, sseg_img=None, savepath=None):
-    # sseg_img is semantic observation from Matterport habitat
-    depth_obs = depth_obs / np.amax(depth_obs) # normalize for visualization
-    rgb_img = Image.fromarray(rgb_obs, mode="RGB")
-    depth_img = Image.fromarray((depth_obs * 255).astype(np.uint8), mode="L")
-    
-    if sseg_img is not None:
-        semantic_img = Image.new("P", (sseg_img.shape[1], sseg_img.shape[0]))
-        semantic_img.putpalette(d3_40_colors_rgb.flatten())
-        semantic_img.putdata((sseg_img.flatten() % 40).astype(np.uint8))
-        semantic_img = semantic_img.convert("RGBA")
-
-        arr = [rgb_img, depth_img, semantic_img]
-        n=3
-    else:
-        arr = [rgb_img, depth_img]
-        n=2
-
-    plt.figure(figsize=(12 ,8))
-    for i, data in enumerate(arr):
-        ax = plt.subplot(1, n, i+1)
-        ax.axis('off')
-        plt.imshow(data)
-    if savepath is None:
-        plt.show()
-    else:
-        plt.savefig(savepath, bbox_inches='tight', pad_inches=0, dpi=100)
-    plt.close()
-
+# def display_sample(rgb_obs, depth_obs, sseg_img=None, savepath=None):
+#     # sseg_img is semantic observation from Matterport habitat
+#     depth_obs = depth_obs / np.amax(depth_obs) # normalize for visualization
+#     rgb_img = Image.fromarray(rgb_obs, mode="RGB")
+#     depth_img = Image.fromarray((depth_obs * 255).astype(np.uint8), mode="L")
+#
+#     if sseg_img is not None:
+#         semantic_img = Image.new("P", (sseg_img.shape[1], sseg_img.shape[0]))
+#         semantic_img.putpalette(d3_40_colors_rgb.flatten())
+#         semantic_img.putdata((sseg_img.flatten() % 40).astype(np.uint8))
+#         semantic_img = semantic_img.convert("RGBA")
+#
+#         arr = [rgb_img, depth_img, semantic_img]
+#         n=3
+#     else:
+#         arr = [rgb_img, depth_img]
+#         n=2
+#
+#     plt.figure(figsize=(12 ,8))
+#     for i, data in enumerate(arr):
+#         ax = plt.subplot(1, n, i+1)
+#         ax.axis('off')
+#         plt.imshow(data)
+#     if savepath is None:
+#         plt.show()
+#     else:
+#         plt.savefig(savepath, bbox_inches='tight', pad_inches=0, dpi=100)
+#     plt.close()
+#
 
 
 def save_visual_steps(test_ds, sg, sem_lbl, abs_pose, ltg, pose_coords, agent_height, save_img_dir_, t):
@@ -358,3 +358,33 @@ def show_image_sseg_2d_label(tensor_or_array, title="image"):
     plt.title(title)
     plt.axis('off')
     plt.show()
+
+
+# zhjd
+def colorEncode(label_map, color_mapping=color_mapping_27):
+    """
+    将单通道标签图转换为彩色图像（RGB）。
+
+    参数:
+        label_map: numpy.ndarray, shape (H, W)，每个像素是类别 ID
+        color_mapping: dict[int, tuple[int, int, int]]，类别 ID → RGB 颜色
+
+    返回:
+        RGB 图像: numpy.ndarray, shape (H, W, 3)，dtype=uint8
+    """
+    # 保证输入是 numpy，并 squeeze 掉多余维度
+    if isinstance(label_map, torch.Tensor):
+        label_map = label_map.detach().cpu().numpy()
+
+    label_map = np.squeeze(label_map)  # 去掉多余维度，例如 (1, H, W) → (H, W)
+
+    if label_map.ndim != 2:
+        raise ValueError(f"[colorEncode] 输入的 label_map 必须是 2D，但实际是 {label_map.shape}")
+
+    h, w = label_map.shape
+    color_img = np.zeros((h, w, 3), dtype=np.uint8)
+
+    for label_id, color in color_mapping.items():
+        color_img[label_map == label_id] = color
+
+    return color_img
