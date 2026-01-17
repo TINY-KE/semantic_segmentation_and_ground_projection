@@ -56,7 +56,7 @@ if __name__ == '__main__':
     # 地图参数
     spatial_labels = 3
     object_labels = 27
-    grid_dim = (384, 384)
+    grid_dim = (400, 400)
     cell_size = 0.1
     crop_size = (64, 64)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -71,6 +71,7 @@ if __name__ == '__main__':
     for i in range(10):
         depth = np.squeeze(all_depth[i])
         sseg = np.squeeze(all_sseg[i])
+        print("sseg.shape: ", sseg.shape)
         position = np.squeeze(all_pose[i])
         position = -1 * position
         print("position: ", position)

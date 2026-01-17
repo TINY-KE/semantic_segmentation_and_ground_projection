@@ -361,7 +361,7 @@ def show_image_sseg_2d_label(tensor_or_array, title="image"):
 
 
 # zhjd
-def colorEncode(label_map, color_mapping=color_mapping_27):
+def colorEncode(label_map):
     """
     将单通道标签图转换为彩色图像（RGB）。
 
@@ -372,6 +372,8 @@ def colorEncode(label_map, color_mapping=color_mapping_27):
     返回:
         RGB 图像: numpy.ndarray, shape (H, W, 3)，dtype=uint8
     """
+    color_mapping = color_mapping_27
+
     # 保证输入是 numpy，并 squeeze 掉多余维度
     if isinstance(label_map, torch.Tensor):
         label_map = label_map.detach().cpu().numpy()

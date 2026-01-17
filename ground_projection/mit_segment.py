@@ -1,5 +1,11 @@
 # System libs
+import sys
 import os
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import argparse
 from distutils.version import LooseVersion
 # Numerical libs
@@ -17,7 +23,7 @@ from mit_semseg.lib.utils import as_numpy
 from PIL import Image
 from tqdm import tqdm
 from mit_semseg.config import cfg
-from ground_projection.util.map_utils import map_utils
+from ground_projection.util import viz_utils, map_utils, utils
 
 # old_idx → new_idx 映射表（只包含有效项）
 DEFAULT_NEW_IDX = 0  # 默认类别（void）
@@ -90,7 +96,7 @@ colors_27 = np.array([color_mapping_27[i] for i in sorted(color_mapping_27.keys(
 #segmentation_module：语义分割模型（包含 encoder + decoder）
 # loader：测试数据的 DataLoader
 # gpu：使用的 GPU 设备编号
-def test(segmentation_module, loader, gpu):
+def inference(segmentation_module, loader, gpu):
     # 设置模型为评估状态（eval()），关闭 dropout、batchnorm 的更新等行为。
     segmentation_module.eval()
 
@@ -156,7 +162,7 @@ def test(segmentation_module, loader, gpu):
         pbar.update(1)  #更新进度条
 
 
-def main(cfg, gpu):
+def SegmentationModuleNet(cfg, gpu):
     # 使用配置 cfg 和指定的 GPU，构建模型并在测试集上运行推理，输出语义分割预测结果。
     torch.cuda.set_device(gpu)
 
@@ -207,7 +213,7 @@ def main(cfg, gpu):
 
     # Main loop
     #  8. 执行推理
-    test(segmentation_module, loader_test, gpu)
+    inference(segmentation_module, loader_test, gpu)
 
     print('Inference done!')
 
@@ -292,4 +298,4 @@ if __name__ == '__main__':
         os.makedirs(cfg.TEST.result)
     print("     [zhjd-debug] cfg.TEST.result: ",cfg.TEST.result)
     # 调用main函数，开始推理
-    main(cfg, args.gpu)
+    SegmentationModuleNet(cfg, args.gpu)
