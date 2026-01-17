@@ -318,6 +318,95 @@ def SegmentationModuleNet(cfg, gpu):
     print('Inference done!')
 
 
+import os
+
+
+def load_pairs_from_association_file(file_path, imgs_root_path, valid_timestamps):
+    """
+    从关联文件中加载符合条件的 RGB 和深度图路径对。
+
+    参数:
+        file_path (str): 关联文件路径
+        imgs_root_path (str): 图像根目录
+        valid_timestamps (set or list): 有效的时间戳集合
+
+    返回:
+        list_depth: [{'timestamp': ..., 'fpath_img': ...}, ...]
+        list_rgb:   [{'timestamp': ..., 'fpath_img': ...}, ...]
+    """
+    print(f"Loading pairs from association file: {file_path}")
+
+    list_depth = []
+    list_rgb = []
+
+    # 确保 valid_timestamps 是 set，提高查找效率
+    if not isinstance(valid_timestamps, set):
+        valid_timestamps = set(valid_timestamps)
+
+    with open(file_path, 'r') as f:
+        for line_num, line in enumerate(f, start=1):
+            parts = line.strip().split()
+            if len(parts) < 4:
+                print(f"[Line {line_num}] 跳过格式错误的行: {line.strip()}")
+                continue
+
+            timestamp, depth_path, _, rgb_path = parts[:4]
+            timestamp = int(timestamp)
+            if timestamp in valid_timestamps:
+                # 构造完整路径
+                depth_full_path = os.path.join(imgs_root_path, depth_path)
+                rgb_full_path = os.path.join(imgs_root_path, rgb_path)
+
+                list_depth.append({
+                    'timestamp': timestamp,
+                    'fpath_img': depth_full_path
+                })
+                list_rgb.append({
+                    'timestamp': timestamp,
+                    'fpath_img': rgb_full_path
+                })
+            else:
+                print(f"[Warning] timestamp {timestamp} 不在 valid_timestamps 中")
+                print(f"valid_timestamps 中的例子: {list(valid_timestamps)[:5]}")  # 只显示前5个
+
+    print(f"✅ 成功加载 {len(list_rgb)} 对图像")
+    return list_depth, list_rgb
+
+def load_poses_from_file(poses_file):
+    """
+    从 KeyFrames_for_smp.txt 文件中读取位姿数据。
+
+    每行格式: time x y z qx qy qz qw
+    返回:
+        poses: List[Tuple[int, List[float]]]，每个元素是 (time, [x, y, z, qx, qy, qz, qw])
+    """
+    poses = []
+    valid_timestamps = []
+
+    try:
+        with open(poses_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue  # 跳过空行或注释
+                parts = line.split()
+                if len(parts) != 8:
+                    print(f"[warning] 跳过格式错误的行: {line}")
+                    continue
+                try:
+                    time = int(parts[0])
+                    pose = list(map(float, parts[1:]))
+                    translation = pose[:3]  # 位移: [x, y, z]
+                    quaternion = pose[3:]  # 四元数: [qx, qy, qz, qw]
+                    valid_timestamps.append(time)
+                    poses.append((translation, quaternion))
+                except ValueError:
+                    print(f"[error] 无法解析该行: {line}")
+    except FileNotFoundError:
+        print(f"[error] 文件未找到: {poses_file}")
+
+    return valid_timestamps, poses
+
 if __name__ == '__main__':
     assert LooseVersion(torch.__version__) >= LooseVersion('0.4.0'), \
         'PyTorch>=0.4.0 is required'
@@ -330,10 +419,24 @@ if __name__ == '__main__':
         description="PyTorch Semantic Segmentation Testing"
     )
     parser.add_argument(
-        "--imgs",
+        "--imgs_root",
         required=True,
         type=str,
         help="an image path, or a directory name"
+    )
+    parser.add_argument(
+        "--association",
+        default="associations.txt",
+        metavar="FILE",
+        help="path to associations.txt",
+        type=str,
+    )
+    parser.add_argument(
+        "--pose_groundtruth",
+        default="associations.txt",
+        metavar="FILE",
+        help="path to pose_groundtruth.txt",
+        type=str,
     )
     parser.add_argument(
         "--cfg",
@@ -355,6 +458,7 @@ if __name__ == '__main__':
         nargs=argparse.REMAINDER,
     )
     args = parser.parse_args()
+    print(list(cfg.keys()))
 
     cfg.merge_from_file(args.cfg)
     cfg.merge_from_list(args.opts)
@@ -380,27 +484,29 @@ if __name__ == '__main__':
     assert os.path.exists(cfg.MODEL.weights_encoder) and \
         os.path.exists(cfg.MODEL.weights_decoder), "checkpoint does not exitst!"
 
+    # RGBD的根目录
+    if not os.path.isdir(args.imgs_root):
+        print(f"❌ 图片地址不存在")
 
-    # 命令行中输入的要处理的图片
-    # 如果是文件夹，就递归查找所有图片；
-    # 否则就是一张图；
-    # 最终构造成一个
-    # list，每个元素是
-    # {'fpath_img': 路径}。
-    # generate testing image list
-    if os.path.isdir(args.imgs):
-        imgs = find_recursive(args.imgs)
-    else:
-        imgs = [args.imgs]
-    assert len(imgs), "imgs should be a path to image (.jpg) or directory."
-    imgs.sort(key=extract_number)       # ✅ 排序：根据文件名中的数字排序
-    cfg.list_test = [{'fpath_img': x} for x in imgs]
+    # 获取位置信息
+    poses_file = args.imgs_root + '/' + 'KeyFrames_for_smp.txt'
+    cfg.valid_timestamps, cfg.poses  = load_poses_from_file(poses_file)
+    # for time, (translation, quaternion) in zip(cfg.valid_timestamps, cfg.poses):
+    #     print(f"VALID  time={time}, translation={translation}, quaternion={quaternion}")
 
-    image_names = get_sorted_numeric_filenames(args.imgs)
-    print("     [zhjd-debug] cfg.list_test: ",cfg.list_test)
+    # 从association文件中读取图片
+    associations_file = args.imgs_root + '/' + args.association
+    cfg.list_depth, cfg.list_rgb = load_pairs_from_association_file(associations_file, args.imgs_root, cfg.valid_timestamps)
+    # print("cfg.valid_timestamps: ", cfg.valid_timestamps)
+    # print("[zhjd-debug] cfg.list_depth:", cfg.list_depth)
+    # print("[zhjd-debug] cfg.list_rgb:  ", cfg.list_rgb)
+    # for time, (translation, quaternion), image in zip(cfg.valid_timestamps, cfg.poses, cfg.list_rgb):
+    #     print(f"VALID  time={time}, translation={translation}, quaternion={quaternion}, image={image}")
 
     if not os.path.isdir(cfg.TEST.result):
         os.makedirs(cfg.TEST.result)
-    print("     [zhjd-debug] cfg.TEST.result: ",cfg.TEST.result)
+
     # 调用main函数，开始推理
-    SegmentationModuleNet(cfg, args.gpu)
+    # SegmentationModuleNet(cfg, args.gpu)
+
+    print("     [zhjd-debug] 结果的保存地址: ", cfg.TEST.result)
