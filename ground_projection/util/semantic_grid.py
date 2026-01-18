@@ -116,8 +116,56 @@ class SemanticGrid(object):
                 ego_grid = F.grid_sample(trans_ego_grid, rot_disp_grid.float(), align_corners=False) # apply rotation
                 ego_grid_out[i,:,:,:] = ego_grid
             return ego_grid_out
-    
 
+    import torch
+    import torch.nn.functional as F
+
+    def transform_global_to_ego_single(self, grid, abs_pose):
+        """
+        将单帧 world 坐标下地图变换到当前 ego 坐标系下。
+
+        参数：
+            grid: Tensor [C, H, W] -- 世界坐标下的地图
+            abs_pose: Tensor [1, 3] -- 当前帧在 world 坐标系下的姿态 [x, y, theta]
+
+        返回：
+            ego_grid: Tensor [C, H, W] -- 当前帧 ego 坐标系下的地图
+        """
+
+        grid = grid.unsqueeze(0)  # 变成 [1, C, H, W]
+
+        # print("grid.shape:", grid.shape)
+        # print("abs_pose.shape:", abs_pose.shape)
+        C, H, W = grid.shape[1:]
+
+        x = abs_pose[0]
+        y = abs_pose[1]
+        theta = abs_pose[2]
+
+        # 计算平移（world → ego 坐标：先移再逆旋）
+        trans_x = -2 * (x / self.cell_size) / H
+        trans_y = -2 * (y / self.cell_size) / W
+
+        # 平移矩阵
+        trans_theta = torch.tensor([
+            [1, 0, trans_x],
+            [0, 1, trans_y]
+        ], dtype=torch.float32, device=grid.device).unsqueeze(0)
+
+        # 旋转矩阵（逆旋转 world → ego）
+        rot_theta = torch.tensor([
+            [torch.cos(-theta), -torch.sin(-theta), 0],
+            [torch.sin(-theta), torch.cos(-theta), 0]
+        ], dtype=torch.float32, device=grid.device).unsqueeze(0)
+
+        # 先平移，再旋转
+        trans_grid = F.affine_grid(trans_theta, grid.size(), align_corners=False)
+        grid_translated = F.grid_sample(grid, trans_grid, align_corners=False)
+
+        rot_grid = F.affine_grid(rot_theta, grid.size(), align_corners=False)
+        ego_grid = F.grid_sample(grid_translated, rot_grid, align_corners=False)
+
+        return ego_grid  # 返回 [1, C, H, W]
 
     def update_sem_grid_bayes(self, geo_grid):
         # Input geo_grid -- B x T x num_of_classes x grid_dim x grid_dim

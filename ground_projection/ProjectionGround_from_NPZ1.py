@@ -9,41 +9,9 @@ import torch
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from ground_projection.util.semantic_grid import SemanticGrid
-from ground_projection.util import viz_utils, map_utils, utils
+from ground_projection.util import viz_utils, map_utils, utils, load_slam_dataset
+from ground_projection.publish3D_util import publish3D_rviz
 
-# 图像分辨率与相机参数
-W, H = 128, 128
-hfov_deg = 79
-hfov = hfov_deg * np.pi / 180.0
-fx = (W / 2) / np.tan(hfov / 2)
-fy = fx
-cx, cy = W / 2, H / 2
-
-
-def depth_to_pointcloud(depth, mask):
-    h, w = depth.shape
-    u, v = np.meshgrid(np.arange(w), np.arange(h))
-    u = u[mask]
-    v = v[mask]
-    z = depth[mask]
-    x = (u - cx) * z / fx
-    y = (v - cy) * z / fy
-    return np.stack((x, y, z), axis=-1), u, v
-
-def transform_pointcloud_to_world(points, position):
-    x_pose, y_pose, o = position
-    cos_o = np.cos(o)
-    sin_o = np.sin(o)
-
-    x_cam = points[:, 0]
-    y_cam = points[:, 1]
-    z_cam = points[:, 2]
-
-    x_world = cos_o * x_cam - sin_o * y_cam + x_pose
-    y_world = sin_o * x_cam + cos_o * y_cam + y_pose
-    z_world = z_cam + 1.0  # 可选：相机高度修正
-
-    return np.stack((x_world, y_world, z_world), axis=-1)
 
 if __name__ == '__main__':
     # 加载数据
@@ -56,7 +24,7 @@ if __name__ == '__main__':
     # 地图参数
     spatial_labels = 3
     object_labels = 27
-    grid_dim = (384, 384)
+    grid_dim = (400, 400)
     cell_size = 0.1
     crop_size = (64, 64)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -71,6 +39,7 @@ if __name__ == '__main__':
     for i in range(10):
         depth = np.squeeze(all_depth[i])
         sseg = np.squeeze(all_sseg[i])
+        print("sseg.shape: ", sseg.shape)
         position = np.squeeze(all_pose[i])
         position = -1 * position
         print("position: ", position)
@@ -90,9 +59,9 @@ if __name__ == '__main__':
 
 
         # 相机点云和像素坐标
-        points_cam, u, v = depth_to_pointcloud(depth, mask)
+        points_cam, u, v = publish3D_rviz.depth_to_pointcloud(depth, mask)
         points_robot = points_cam @ R_robot_to_cam
-        points_local = transform_pointcloud_to_world(points_robot, [0,0,0])
+        points_local = publish3D_rviz.transform_pointcloud_to_firstFrameCoordinate(points_robot, [0, 0, 0])
         local3D = points_local[np.newaxis, ...]  # shape: [1, N, 3]
         local3D = torch.from_numpy(local3D).float().to("cuda")
 

@@ -88,6 +88,14 @@ def transform_pointcloud_to_world(points, camera_position):
 
     return world_points  # shape: (N, 3)
 
+def filter_depth_edges(depth, threshold=0.2):
+    """过滤深度图边缘的异常跳变（高梯度）"""
+    depth = depth.astype(np.float32)
+    dz_x = np.abs(np.diff(depth, axis=1, append=depth[:, -1:]))
+    dz_y = np.abs(np.diff(depth, axis=0, append=depth[-1:, :]))
+    edge_mask = (dz_x < threshold) & (dz_y < threshold)
+    return edge_mask
+
 
 def publish_marker_pointcloud(points, marker_id=0, color=(0.0, 1.0, 0.0), scale=0.05):
     """使用 visualization_msgs/Marker 发布点云为小球列表"""
@@ -153,16 +161,20 @@ if __name__ == '__main__':
 
         First_Camera_t = np.array([0, 0, 1.17])
 
+        mask = (sseg > -1)
+        edge_mask = filter_depth_edges(depth, threshold=0.1)
+
         # 遍历所有类别
         for class_id in range(27):
             mask = (sseg == class_id)
             if not np.any(mask):
                 continue
 
-            points_cam = depth_to_pointcloud(depth, mask)
+            final_mask = mask & edge_mask
+
+            points_cam = depth_to_pointcloud(depth, final_mask)
             points_in_first_camera_pose = transform_pointcloud_to_world(points_cam, camera_position)
             points_world = points_in_first_camera_pose@First_Camera_Pose_ICL + First_Camera_t
-            # points_world = transform_pointcloud_to_world(points_cam, camera_position)
 
             # 可选过滤：仅保留所有坐标小于 2 的点
             mask_filter = points_world[:, 2] < 2
@@ -175,7 +187,8 @@ if __name__ == '__main__':
             color = tuple([c / 255.0 for c in rgb])
             marker_id = i * 100 + class_id  # 保证唯一 ID
 
-            publish_marker_pointcloud(points_world, marker_id=marker_id, color=color, scale=0.003)
+            publish_marker_pointcloud(points_world, marker_id=marker_id, color=color, scale=0.01)
+            # publish_marker_pointcloud(points_world, marker_id=marker_id, color=color, scale=0.003)
 
         # mask = (sseg>-1)
         # points_cam = depth_to_pointcloud(depth, mask)

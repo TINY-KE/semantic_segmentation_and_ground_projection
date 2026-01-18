@@ -30,33 +30,54 @@ color_mapping_27 = {
     24: (245, 245, 220),   25: (139, 69, 19),     26: (64, 224, 208)
 }
 
+def filter_depth_edges(depth, threshold=0.2):
+    """过滤深度图边缘的异常跳变（高梯度）"""
+    depth = depth.astype(np.float32)
+    dz_x = np.abs(np.diff(depth, axis=1, append=depth[:, -1:]))
+    dz_y = np.abs(np.diff(depth, axis=0, append=depth[-1:, :]))
+    edge_mask = (dz_x < threshold) & (dz_y < threshold)
+    return edge_mask
+
+
 def depth_to_pointcloud(depth, mask):
-    """将深度图中的选中像素转换为相机坐标系下的 3D 点云"""
+    edge_mask = filter_depth_edges(depth, threshold=0.2)
+    final_mask = mask & edge_mask
+
+    """将深度图中的选中像素转换为相机坐标系下的 3D 点云，并统计被过滤掉的点数量"""
     h, w = depth.shape
+    # print("h:{}, w:{}".format(h, w))
     u, v = np.meshgrid(np.arange(w), np.arange(h))
-    u = u[mask]
-    v = v[mask]
-    z = depth[mask] / DepthMapFactor
-    # ✅ 过滤掉 z < 1 的点
+    u = u[final_mask]
+    v = v[final_mask]
+    z = depth[final_mask] / DepthMapFactor
+    # ✅ 过滤条件
     valid = z >= 1
+    # 只保留 valid 的点
     u = u[valid]
     v = v[valid]
     z = z[valid]
+
     x = (u - cx) * z / fx
     y = (v - cy) * z / fy
-    # return np.stack((x, y, z), axis=-1)  # (N, 3)
-    points = np.stack((x, y, z), axis=-1)  # shape: (H, W, 3)
-    return points.reshape(-1, 3)  # ✅ 返回 shape: (N, 3)
 
-def transform_pointcloud_to_world(points, camera_position):
+    return np.stack((x, y, z), axis=-1), u, v  # shape: (N, 3)
+
+
+def transform_pointcloud_to_world(points, rot, trans):
+    points_world = points @  rot.T + trans
+    return points_world
+
+
+
+def transform_pointcloud_to_firstFrameCoordinate(points, camera_position):
     """将点云从相机坐标系变换到世界坐标系"""
     translation = np.array(camera_position[:3])   # 平移向量: tx, ty, tz
     quaternion = np.array(camera_position[3:])    # 四元数: qx, qy, qz, qw
     rot = R.from_quat(quaternion)
     rotation_matrix = rot.as_matrix()
     rotated_points = points @ rotation_matrix.T
-    world_points = rotated_points + translation
-    return world_points
+    points_firstFrameCoordinate = rotated_points + translation
+    return points_firstFrameCoordinate
 
 def publish_marker_pointcloud(points, marker_id=0, color=(0.0, 1.0, 0.0), scale=0.05):
     """使用 visualization_msgs/Marker 发布点云为小球列表"""
@@ -112,7 +133,7 @@ def Publish3D():
             if points_cam.size == 0:
                 continue
 
-            points_world = transform_pointcloud_to_world(points_cam, camera_position)
+            points_world = transform_pointcloud_to_firstFrameCoordinate(points_cam, camera_position)
 
             if points_world.shape[0] == 0:
                 continue
@@ -131,7 +152,7 @@ def publish3D_from_depth_path(depth_path, pose):
     depth_np = np.array(depth_img).astype(np.float32)  # 深度图原始值 (H, W)
     points_cam = depth_to_pointcloud(depth_np)
     print("zhjd-debug, points_cam size: ", points_cam.shape)
-    points_world = transform_pointcloud_to_world(points_cam, pose)
+    points_world = transform_pointcloud_to_firstFrameCoordinate(points_cam, pose)
     default_marker_id = 0
     default_marker_id += 1
     publish_marker_pointcloud(points_world, marker_id=default_marker_id, color=(0, 2, 255), scale=0.03)

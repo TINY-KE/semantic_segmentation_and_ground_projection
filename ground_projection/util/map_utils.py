@@ -112,6 +112,7 @@ def est_occ_from_depth(local3D, grid_dim, cell_size, device, occupancy_height_th
 def ground_projection_my(points2D, local3D, sseg, sseg_labels, grid_dim, cell_size):
     ego_grid_sseg = torch.zeros((sseg.shape[0], sseg_labels, grid_dim[0], grid_dim[1]), dtype=torch.float32, device='cuda')
     # 逐帧处理每一个时间步。
+    print("sseg.shape[0]: ",sseg.shape[0] )
     for i in range(sseg.shape[0]): # sequence length
         # 当前帧的语义分割图；
         sseg_step = sseg[i,:,:,:].unsqueeze(0) # 1 x 1 x H x W
@@ -120,15 +121,15 @@ def ground_projection_my(points2D, local3D, sseg, sseg_labels, grid_dim, cell_si
         # 对应的相机系下的 3D 坐标。
         local3D_step = local3D[i]
 
-        # 抛弃距离相机太近（< 0.5m）或太远（> 3m）的点；
-        depth = local3D_step[:, 0]
-        valid_inds = torch.nonzero(torch.where((depth < 7) & (depth > 0.5), 1, 0)).squeeze(dim=1)
-        local3D_step = local3D_step[valid_inds, :]
-        points2D_step = points2D_step[valid_inds, :]
+        # # 抛弃距离相机太近（< 0.5m）或太远（> 3m）的点；
+        # depth = local3D_step[:, 0]
+        # valid_inds = torch.nonzero(torch.where((depth < 7) & (depth > 0.1), 1, 0)).squeeze(dim=1)
+        # local3D_step = local3D_step[valid_inds, :]
+        # points2D_step = points2D_step[valid_inds, :]
 
-        # 抛弃 y 轴高度 > 1 米的点（如天花板、吊灯等）；
+        # 抛弃 y 轴高度 > 2 米的点（如天花板、吊灯等）；
         h = local3D_step[:, 2]
-        valid_inds = torch.nonzero(torch.where(h < 1, 1, 0)).squeeze(dim=1)
+        valid_inds = torch.nonzero(torch.where(h < 2, 1, 0)).squeeze(dim=1)
         local3D_step = local3D_step[valid_inds, :]
         points2D_step = points2D_step[valid_inds, :]
 
