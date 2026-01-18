@@ -294,3 +294,53 @@ class TestDataset(BaseDataset):
 
     def __len__(self):
         return self.num_sample
+
+
+
+# 张嘉东创建
+class InferDataset(BaseDataset):
+    def __init__(self, odgt, opt, **kwargs):
+        super(InferDataset, self).__init__(odgt, opt, **kwargs)
+
+    def __getitem__(self, index):
+        this_record = self.list_sample[index]
+
+        # load Depth
+        depth_path = this_record['fpath_depth']  # 单个 PNG 路径
+        depth_img = Image.open(depth_path)
+        depth_np = np.array(depth_img).astype(np.float32)  # 深度图原始值 (H, W)
+
+        # load RGB
+        image_path = this_record['fpath_rgb']
+        img = Image.open(image_path).convert('RGB')
+
+        ori_width, ori_height = img.size
+
+        img_resized_list = []
+        for this_short_size in self.imgSizes:
+            # calculate target height and width
+            scale = min(this_short_size / float(min(ori_height, ori_width)),
+                        self.imgMaxSize / float(max(ori_height, ori_width)))
+            target_height, target_width = int(ori_height * scale), int(ori_width * scale)
+
+            # to avoid rounding in network
+            target_width = self.round2nearest_multiple(target_width, self.padding_constant)
+            target_height = self.round2nearest_multiple(target_height, self.padding_constant)
+
+            # resize images
+            img_resized = imresize(img, (target_width, target_height), interp='bilinear')
+
+            # image transform, to torch float tensor 3xHxW
+            img_resized = self.img_transform(img_resized)
+            img_resized = torch.unsqueeze(img_resized, 0)
+            img_resized_list.append(img_resized)
+
+        output = dict()
+        output['img_ori'] = np.array(img)
+        output['img_data'] = [x.contiguous() for x in img_resized_list]  # output['img_data'] 是给 模型输入用的，PyTorch 模型期望输入是 torch.Tensor，而不是 np.ndarray。
+        output['info'] = this_record['fpath_rgb']
+        output['depth_ori'] = depth_np
+        return output
+
+    def __len__(self):
+        return self.num_sample

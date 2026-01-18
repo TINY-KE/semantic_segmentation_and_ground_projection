@@ -15,7 +15,7 @@ import torch.nn as nn
 from scipy.io import loadmat
 import csv
 # Our libs
-from mit_semseg.dataset import TestDataset
+from mit_semseg.dataset import InferDataset
 from mit_semseg.models import ModelBuilder, SegmentationModule
 from mit_semseg.utils import colorEncode, find_recursive, setup_logger
 from mit_semseg.lib.nn import user_scattered_collate, async_copy_to
@@ -147,7 +147,7 @@ def get_sorted_numeric_filenames(folder_path):
     return numeric_files
 
 def visualize_result(data, pred, cfg):
-    (img, info) = data
+    (img, depth, info) = data
 
     pred = np.int32(pred)
     print("     [zhjd-debug] pred.shape：", pred.shape)   #  [zhjd-debug] pred.shape： (540, 960)
@@ -165,11 +165,16 @@ def visualize_result(data, pred, cfg):
         if ratio > 0.1:
             print("  new_id {}: {:.2f}%".format(new_id, ratio))
 
-    # 上色（你可以根据 new_id 自定义颜色映射）
+    # 语义分割图上色（你可以根据 new_id 自定义颜色映射）
     pred_color = colorEncode(pred_new, colors_27).astype(np.uint8)
 
+    # 深度图上色
+    import cv2
+    depth_norm = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    depth_color = cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET)  # (H, W, 3)
+
     # 拼接原图和预测图
-    im_vis = np.concatenate((img, pred_color), axis=1)
+    im_vis = np.concatenate((img, depth_color, pred_color), axis=1)
     img_name = info.split('/')[-1]
     Image.fromarray(im_vis).save(
         os.path.join(cfg.TEST.result, img_name.replace('.jpg', '.png')))
@@ -180,12 +185,13 @@ def visualize_result(data, pred, cfg):
 def inference(segmentation_module, loader, gpu):
     all_imgs = []
     all_ssegs = []
-
-    # 设置模型为评估状态（eval()），关闭 dropout、batchnorm 的更新等行为。
-    segmentation_module.eval()
+    all_depths = []
 
     #  tqdm 进度条
     pbar = tqdm(total=len(loader))
+
+    # 设置模型为评估状态（eval()），关闭 dropout、batchnorm 的更新等行为。
+    segmentation_module.eval()
 
     # 遍历测试数据集
     for batch_data in loader:
@@ -214,6 +220,7 @@ def inference(segmentation_module, loader, gpu):
             scores = torch.zeros(1, cfg.DATASET.num_class, segSize[0], segSize[1])
             scores = async_copy_to(scores, gpu)
 
+            # 对同一张图片，从五个维度进行分析
             for img in img_resized_list:
                 # 构建 feed_dict，只包含模型需要的键（去除原始图等无关项）
                 feed_dict = batch_data.copy()
@@ -226,7 +233,7 @@ def inference(segmentation_module, loader, gpu):
                 # forward pass
                 # 模型前向推理，得到每类的分数图 pred_tmp
                 pred_tmp = segmentation_module(feed_dict, segSize=segSize)
-                print("     [zhjd-debug] pred_tmp 维度：", pred_tmp.shape)  # [zhjd-debug] pred_tmp 维度： torch.Size([1, 150, 574, 860])
+                # print("     [zhjd-debug] pred_tmp 维度：", pred_tmp.shape)  # [zhjd-debug] pred_tmp 维度： torch.Size([1, 150, 574, 860])
                 #  将多尺度推理的结果进行平均融合
                 scores = scores + pred_tmp / len(cfg.DATASET.imgSizes)   # len(cfg.DATASET.imgSizes)为尺度数量，等于5。
 
@@ -242,24 +249,19 @@ def inference(segmentation_module, loader, gpu):
             pred_2 = np.int32(pred)
             pred_3 = np.vectorize(lambda x: old_to_new_idx.get(x + 1, DEFAULT_NEW_IDX))(pred_2)  # ✨ 新增：将 old idx 转成 new idx
             all_ssegs.append(pred_3)
+            depth_ori = batch_data['depth_ori']  # 原始图像
+            all_depths.append(depth_ori)
 
         # 保存为本地图片
         visualize_result(
-            (batch_data['img_ori'], batch_data['info']),
+            (batch_data['img_ori'], batch_data['depth_ori'], batch_data['info']),
             pred,
             cfg
         )
 
         pbar.update(1)  #更新进度条
 
-    # 保存所有图像到一个 NPZ 文件
-    #     # work2: ['abs_pose', 'ego_grid_crops_spatial', 'step_ego_grid_crops_spatial', 'gt_grid_crops_spatial', 'gt_grid_crops_objects',
-    #     'images', 'ssegs', 'depth_imgs', 'pred_ego_crops_sseg', 'step_ego_grid_27']
-    save_path = os.path.join(cfg.TEST.result, "all_data.npz")
-    np.savez_compressed(save_path,
-                        imgs=np.stack(all_imgs),  # (N, H, W, 3)
-                        ssegs=np.stack(all_ssegs))  # (N, H, W)
-    print(f"\n✅ Saved all data to: {save_path}")
+    return all_imgs, all_depths, all_ssegs
 
 
 def SegmentationModuleNet(cfg, gpu):
@@ -292,15 +294,15 @@ def SegmentationModuleNet(cfg, gpu):
     segmentation_module = SegmentationModule(net_encoder, net_decoder, crit)
 
     # Dataset and Loader
-    # 5. 构建测试数据集
-    dataset_test = TestDataset(
-        cfg.list_test,
+    # 5. 构建推理数据集
+    dataset_infer = InferDataset(
+        cfg.list_rgbd,
         cfg.DATASET)
 
     #  6. 构建 DataLoader
-    print("     [zhjd-debug] batch_size：",cfg.TEST.batch_size)
+    # print("     [zhjd-debug] batch_size：",cfg.TEST.batch_size)
     loader_test = torch.utils.data.DataLoader(
-        dataset_test,
+        dataset_infer,
         batch_size=cfg.TEST.batch_size,  #  batch_size = 1
         shuffle=False,
         collate_fn=user_scattered_collate,
@@ -313,10 +315,20 @@ def SegmentationModuleNet(cfg, gpu):
 
     # Main loop
     #  8. 执行推理
-    inference(segmentation_module, loader_test, gpu)
-
+    all_imgs, all_depths, all_ssegs = inference(segmentation_module, loader_test, gpu)
     print('Inference done!')
 
+    # 保存所有图像到一个 NPZ 文件
+    #     # work2: ['abs_pose', 'ego_grid_crops_spatial', 'step_ego_grid_crops_spatial', 'gt_grid_crops_spatial', 'gt_grid_crops_objects',
+    #     'images', 'ssegs', 'depth_imgs', 'pred_ego_crops_sseg', 'step_ego_grid_27']
+    save_path = os.path.join(cfg.TEST.result, "all_data.npz")
+    np.savez_compressed(save_path,
+                        images=np.stack(all_imgs),  # (N, H, W, 3)
+                        ssegs=np.stack(all_ssegs),
+                        depth_imgs=np.stack(all_depths),
+                        abs_pose=np.stack(cfg.poses)
+                        )  # (N, H, W)
+    print(f"\n✅ Saved SSEG PNG to: {save_path}")
 
 import os
 
@@ -336,8 +348,7 @@ def load_pairs_from_association_file(file_path, imgs_root_path, valid_timestamps
     """
     print(f"Loading pairs from association file: {file_path}")
 
-    list_depth = []
-    list_rgb = []
+    list_rgbd = []
 
     # 确保 valid_timestamps 是 set，提高查找效率
     if not isinstance(valid_timestamps, set):
@@ -345,6 +356,7 @@ def load_pairs_from_association_file(file_path, imgs_root_path, valid_timestamps
 
     with open(file_path, 'r') as f:
         for line_num, line in enumerate(f, start=1):
+
             parts = line.strip().split()
             if len(parts) < 4:
                 print(f"[Line {line_num}] 跳过格式错误的行: {line.strip()}")
@@ -357,22 +369,19 @@ def load_pairs_from_association_file(file_path, imgs_root_path, valid_timestamps
                 depth_full_path = os.path.join(imgs_root_path, depth_path)
                 rgb_full_path = os.path.join(imgs_root_path, rgb_path)
 
-                list_depth.append({
+                list_rgbd.append({
                     'timestamp': timestamp,
-                    'fpath_img': depth_full_path
-                })
-                list_rgb.append({
-                    'timestamp': timestamp,
-                    'fpath_img': rgb_full_path
+                    'fpath_depth': depth_full_path,
+                    'fpath_rgb': rgb_full_path
                 })
             else:
                 print(f"[Warning] timestamp {timestamp} 不在 valid_timestamps 中")
                 print(f"valid_timestamps 中的例子: {list(valid_timestamps)[:5]}")  # 只显示前5个
 
-    print(f"✅ 成功加载 {len(list_rgb)} 对图像")
-    return list_depth, list_rgb
+    print(f"✅ 成功加载 {len(list_rgbd)} 对图像")
+    return list_rgbd
 
-def load_poses_from_file(poses_file):
+def load_poses_from_file(poses_file, skip_every_n=1):
     """
     从 KeyFrames_for_smp.txt 文件中读取位姿数据。
 
@@ -385,23 +394,30 @@ def load_poses_from_file(poses_file):
 
     try:
         with open(poses_file, 'r') as f:
-            for line in f:
+            for idx, line in enumerate(f):
+                if idx % skip_every_n != 0:
+                    continue  # 跳过不需要的行（每隔 N 行保留一行）
+
                 line = line.strip()
                 if not line or line.startswith('#'):
-                    continue  # 跳过空行或注释
+                    continue  # 跳过空行和注释
+
                 parts = line.split()
                 if len(parts) != 8:
                     print(f"[warning] 跳过格式错误的行: {line}")
                     continue
+
                 try:
                     time = int(parts[0])
                     pose = list(map(float, parts[1:]))
-                    translation = pose[:3]  # 位移: [x, y, z]
-                    quaternion = pose[3:]  # 四元数: [qx, qy, qz, qw]
+                    # translation = pose[:3]  # 位移: [x, y, z]
+                    # quaternion = pose[3:]  # 四元数: [qx, qy, qz, qw]
                     valid_timestamps.append(time)
-                    poses.append((translation, quaternion))
+                    # poses.append((translation, quaternion))
+                    poses.append(pose)
                 except ValueError:
                     print(f"[error] 无法解析该行: {line}")
+
     except FileNotFoundError:
         print(f"[error] 文件未找到: {poses_file}")
 
@@ -490,14 +506,14 @@ if __name__ == '__main__':
 
     # 获取位置信息
     poses_file = args.imgs_root + '/' + 'KeyFrames_for_smp.txt'
-    cfg.valid_timestamps, cfg.poses  = load_poses_from_file(poses_file)
+    cfg.valid_timestamps, cfg.poses  = load_poses_from_file(poses_file, skip_every_n=10)
     # for time, (translation, quaternion) in zip(cfg.valid_timestamps, cfg.poses):
     #     print(f"VALID  time={time}, translation={translation}, quaternion={quaternion}")
 
     # 从association文件中读取图片
     associations_file = args.imgs_root + '/' + args.association
-    cfg.list_depth, cfg.list_rgb = load_pairs_from_association_file(associations_file, args.imgs_root, cfg.valid_timestamps)
-    # print("cfg.valid_timestamps: ", cfg.valid_timestamps)
+    cfg.list_rgbd = load_pairs_from_association_file(associations_file, args.imgs_root, cfg.valid_timestamps)
+    print("cfg.valid_timestamps: ", cfg.valid_timestamps)
     # print("[zhjd-debug] cfg.list_depth:", cfg.list_depth)
     # print("[zhjd-debug] cfg.list_rgb:  ", cfg.list_rgb)
     # for time, (translation, quaternion), image in zip(cfg.valid_timestamps, cfg.poses, cfg.list_rgb):
@@ -507,6 +523,6 @@ if __name__ == '__main__':
         os.makedirs(cfg.TEST.result)
 
     # 调用main函数，开始推理
-    # SegmentationModuleNet(cfg, args.gpu)
+    SegmentationModuleNet(cfg, args.gpu)
 
     print("     [zhjd-debug] 结果的保存地址: ", cfg.TEST.result)
