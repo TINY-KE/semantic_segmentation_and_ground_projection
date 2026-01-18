@@ -49,7 +49,7 @@ then
 
 ## Inference
 
-python3 -u ground_projection/mit_segment_NPZ_ICL.py \
+python3 -u ground_projection/mit_segment_NPZ_ICL_3D_project.py \
   --imgs $IMG_ROOT \
   --association $ASSOCIATION_FILE_NAME \
   --cfg config/ade20k-resnet50dilated-ppm_deepsup.yaml \
