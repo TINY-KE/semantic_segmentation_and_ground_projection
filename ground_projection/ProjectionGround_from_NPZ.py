@@ -41,12 +41,15 @@ if __name__ == '__main__':
     pc_pub = rospy.Publisher("/pointcloud_world", PointCloud2, queue_size=1)
     rospy.sleep(1.0)
 
-    # 加载数据
+    # 一、 加载数据
     npz_file_path = "/home/robotlab/work/semantic-segmentation-pytorch/save_results/all_data.npz"
     data = np.load(npz_file_path)
     all_sseg = data["ssegs"]       # (N, H, W)
     all_depth = data["depth_imgs"] # (N, H, W)
-    all_pose = data["abs_pose"]    # (N, 3)
+    all_pose = data["abs_pose"]    # (N, 7)
+    all_images = data["images"]
+    virtual_robot_ground_poses = []
+    ego_crops = []
 
     # 地图参数
     spatial_labels = 3
@@ -57,19 +60,19 @@ if __name__ == '__main__':
     crop_size = (64, 64)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # 初始化全局地图张量
+    # 二、初始化全局地图张量
     global_grid = torch.zeros((1, spatial_labels, *grid_dim), dtype=torch.float32).to("cuda")
     # For each episode we need a new instance of a fresh global grid
     sg = SemanticGrid(1, grid_dim, crop_size[0], cell_size,
                       spatial_labels=spatial_labels, object_labels=object_labels)
-    abs_poses = []
-    camera_poses = []
 
+    # 三、 读取每一个时间步骤的信息
     for i in range(len(all_sseg)):
         depth = np.squeeze(all_depth[i])
         sseg = np.squeeze(all_sseg[i])
         camera_position = np.squeeze(all_pose[i])  # tx ty tz qx qy qz qw
 
+        # 四、计算相机在world坐标系下的pose
         # 相机 → 机器人坐标系变换
         # 机器人坐标系：x轴朝前，y轴朝左，z轴朝上，
         #  y轴朝左，x轴朝下，z轴朝前
@@ -112,11 +115,12 @@ if __name__ == '__main__':
             first_init_pose = trans_world
             first_init_flag = True
 
+        # 五、计算点云在相机坐标系下的坐标
         # 相机点云和像素坐标
         points_cam, u, v = publish3D_rviz.depth_to_pointcloud(depth, mask)
         points_world = publish3D_rviz.transform_pointcloud_to_world(points_cam, rot_world, trans_world)
 
-        # # 发布点云到 RViz
+        # 发布点云到 RViz， 用于检查
         # if points_world.shape[0] > 10:
         #     pc_msg = create_pointcloud2_from_xyz(points_world, frame_id="map")
         #     pc_pub.publish(pc_msg)
@@ -127,10 +131,11 @@ if __name__ == '__main__':
         points2D = np.stack((u, v), axis=-1)[np.newaxis, ...]  # shape: [1, N, 2]
         points2D = torch.from_numpy(points2D).float().to("cuda")
 
+        # 有效点云对应的语义分割像素点
         ssegs_3 = sseg[np.newaxis, np.newaxis, :, :]  # (1, 1, H, W)
         ssegs_3 = torch.from_numpy(ssegs_3).float().to("cuda")
 
-        # 构建单帧语义栅格
+        # 六、地面投影，构建单帧语义栅格地图
         ego_semantic_sseg_27 = map_utils.ground_projection_my(
             points2D, local3D, ssegs_3,
             sseg_labels=object_labels,
@@ -139,12 +144,12 @@ if __name__ == '__main__':
         )  # shape: [t, 27, 184, 184]
         # print("ego_grid_sseg_3.shape: ", ego_semantic_sseg_27.shape)
 
-        # FIXME: 由于SLAM第一帧位姿为0，SLAM中的ego_semantic_sseg_27都是world坐标系下的。因此下文的全局更新时，设置_rel_pose和abs_poses为0即可。
 
-        # 累加到全局地图
+        # 七、累加到全局地图
         geo_semantic_sseg = ego_semantic_sseg_27
         step_geo_grid_sseg = sg.update_semantic_proj_grid_bayes(geo_grid=geo_semantic_sseg.unsqueeze(0))
 
+        # 八、计算【虚拟机器人平台】在world坐标系下的平面坐标virtual_robot_ground_pose
         first_z_world = np.array([1, 0, 0])
         # 相机 Z 轴方向（本体坐标系）
         z_cam = np.array([0, 0, 1])
@@ -177,14 +182,20 @@ if __name__ == '__main__':
         # print(f"相机朝向与X轴夹角：{abs(angle_deg):.2f}°")
 
         print("机器人位姿： ", [trans_world[0], trans_world[1],  angle_deg])
-        abs_pose = [-1* trans_world[0], -1* trans_world[1],  angle_rad]
-        step_ego_grid_sseg = sg.transform_global_to_ego_single(grid=step_geo_grid_sseg.squeeze(0).squeeze(0), abs_pose=torch.tensor(abs_pose).to(device))
+        virtual_robot_ground_pose = [-1* trans_world[0], -1* trans_world[1],  angle_rad]
+        virtual_robot_ground_poses.append(virtual_robot_ground_pose)
+
+
+        # 九、将全局地图转移到机器人为中心【ego】
+        step_ego_grid_sseg = sg.transform_global_to_ego_single(grid=step_geo_grid_sseg.squeeze(0).squeeze(0), abs_pose=torch.tensor(virtual_robot_ground_pose).to(device))
         # Crop the grid around the agent at each timestep
-        # # 剪切
+
+        # 十、剪切
         step_ego_grid_crops = map_utils.crop_grid(grid=step_ego_grid_sseg, crop_size=crop_size)
         step_ego_grid_crops = step_ego_grid_crops.squeeze(0)
+        ego_crops.append(step_ego_grid_crops)
 
-        # 可视化
+        # 十一、可视化和保存到本地
         flag = 4
         if(flag == 1):
             ego_semantic_sseg_27 = ego_semantic_sseg_27.squeeze(0)
@@ -216,3 +227,33 @@ if __name__ == '__main__':
         os.makedirs(output_dir, exist_ok=True)
         save_path = os.path.join(output_dir, f"frame_{i:02d}.png")
         plt.savefig(save_path, dpi=300)
+
+        # 十二、添加到NPZ文件中
+        # 检查all_sseg = data["ssegs"]       # (N, H, W)
+        #     all_depth = data["depth_imgs"] # (N, H, W)
+        #     all_pose = data["abs_pose"]    # (N, 7)
+        #     virtual_robot_ground_poses = []
+        #     ego_crops = []  长度是不是一致
+        # === 循环之后，保存为 .npz 文件 ===
+        virtual_robot_ground_poses_np = np.array(virtual_robot_ground_poses)  # (N, 3)
+        ego_crops_tensor = torch.stack(ego_crops, dim=0)  # (N, C, H, W)
+        ego_crops_np = ego_crops_tensor.cpu().numpy().astype(np.float32)  #概率值（通常在0-1之间）
+        # #     # work2: ['abs_pose', 'ego_grid_crops_spatial', 'step_ego_grid_crops_spatial', 'gt_grid_crops_spatial', 'gt_grid_crops_objects',
+        #     #     'images', 'ssegs', 'depth_imgs', 'pred_ego_crops_sseg', 'step_ego_grid_27']
+        output_npz_path = "/home/robotlab/work/semantic-segmentation-pytorch/save_results/virtual_robot_outputs.npz"
+        np.savez(
+            output_npz_path,
+            depth_imgs=all_depth,
+            images=all_images,
+            abs_pose=all_pose,
+            ssegs=all_sseg,
+            virtual_robot_ground_poses=virtual_robot_ground_poses_np,
+            step_ego_grid_27=ego_crops_np
+        )
+        print("数据维度检查:")
+        print("  depth_imgs.shape:", all_depth.shape)
+        print("  images.shape:", all_images.shape)
+        print("  all_pose.shape:", all_pose.shape)
+        print("  all_sseg.shape:", all_sseg.shape)
+        print("  virtual_robot_ground_poses.shape:", virtual_robot_ground_poses_np.shape)
+        print("  step_ego_grid_27.shape:", ego_crops_np.shape)
