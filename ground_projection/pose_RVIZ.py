@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+#  函数作用： 显示
+
 import rospy
 import numpy as np
 from visualization_msgs.msg import Marker
