@@ -4,7 +4,7 @@
 #TEST_IMG=ADE_val_00001519.jpg
 #TEST_IMG=test.jpg
 #TEST_IMG=/home/robotlab/work/semantic-segmentation-pytorch/RGB_images/rgb
-TEST_IMG=/home/robotlab/work/semantic-segmentation-pytorch/RGB_images/icl
+TEST_IMG=/home/robotlab/work2/semantic-segmentation-pytorch/RGB_images/icl
 #TEST_IMG=/home/robotlab/work/semantic-segmentation-pytorch/RGB_images/NPZ_test
 #TEST_IMG=/home/robotlab/work/semantic-segmentation-pytorch/RGB_images/binzhou_wjl/
 #TEST_IMG=/home/robotlab/work/semantic-segmentation-pytorch/RGB_images/toilet/

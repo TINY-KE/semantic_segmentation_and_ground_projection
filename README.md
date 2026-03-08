@@ -11,7 +11,10 @@
   pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu118
   pip install -e .
   conda install matplotlib
- pip install numpy-quaternion
+  pip install numpy-quaternion
+  pip install rospkg
+
+  
 # 多机器人分布
   + 修改两个电脑的bashrc
       export ROS_MASTER_URI=http://192.168.4.56:11311

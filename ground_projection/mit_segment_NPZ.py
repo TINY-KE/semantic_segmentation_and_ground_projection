@@ -208,6 +208,9 @@ def SegmentationModuleNet(cfg, gpu):
     # 构建主干网络（如 dilated ResNet-50）。
     # 加载预训练权重。
     # fc_dim 是输出特征维度（如 2048）。
+    print(cfg.MODEL.arch_encoder)
+    print(cfg.MODEL.arch_decoder)
+    input("请确认上述架构名称是否正确，按 Enter 继续...")
     net_encoder = ModelBuilder.build_encoder(
         arch=cfg.MODEL.arch_encoder,
         fc_dim=cfg.MODEL.fc_dim,
