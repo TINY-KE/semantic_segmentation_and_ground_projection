@@ -13,8 +13,8 @@
   conda install matplotlib
   pip install numpy-quaternion
   pip install rospkg
+  pip install yacs
 
-  
 # 多机器人分布
   + 修改两个电脑的bashrc
       export ROS_MASTER_URI=http://192.168.4.56:11311
@@ -42,7 +42,14 @@
 + 将ego保存到NPZ文件中
     + 
 
-# 使用顺序：
+# 在线版本
+## ros_segment.py
+  + 对其rgb depth  位姿
+  + 
+## 
+
+
+# 离线版本——使用顺序：
 ## 生成语义分割Image，检查语义分割是否有问题
   + 使用方法：bash demo_test.sh  #
   + 修改demo_test.sh文件

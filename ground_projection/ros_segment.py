@@ -3,6 +3,10 @@ import rospy
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image as ROSImage
 import cv2
+import message_filters  # --- 必须引入：用于消息同步
+import tf2_ros         # --- 用于处理 TF
+import tf2_geometry_msgs
+import tf.transformations  # 确保导入此库以进行四元数转换
 
 # System libs
 import sys
@@ -44,6 +48,10 @@ class ROSSegmentationNode:
         self.prev_time = time.time() # 初始化时间戳
         self.fps = 0.0
 
+        # TF Buffer 初始化
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+
         # 构建模型
         self.net_encoder = ModelBuilder.build_encoder(arch=cfg.MODEL.arch_encoder, fc_dim=cfg.MODEL.fc_dim, weights=cfg.MODEL.weights_encoder)
         self.net_decoder = ModelBuilder.build_decoder(arch=cfg.MODEL.arch_decoder, fc_dim=cfg.MODEL.fc_dim, num_class=cfg.DATASET.num_class, weights=cfg.MODEL.weights_decoder, use_softmax=True)
@@ -58,17 +66,43 @@ class ROSSegmentationNode:
         img = (img - mean) / std
         return torch.from_numpy(img.transpose(2, 0, 1))
     
-    def callback(self, msg):
+    def callback(self, rgb_msg, depth_msg):
         # --- 新增：只处理最新图像 ---
         if self.is_busy:
             return  # 如果上一帧还没处理完，直接跳过当前这一帧
         
         self.is_busy = True
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            # 1. 图像处理
+            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
             img_ori = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
             img_resized = cv2.resize(img_ori, (512, 512)) 
             img_data = self.preprocess(img_resized) # 用 resize 后的图计算
+            # 2. 获取 TF 数据 (示例：查询从 camera 到 base_link 的变换)
+            try:
+                # 获取 base_link 相对于 map 的变换
+                transform = self.tf_buffer.lookup_transform(
+                    "map",            # 目标坐标系 (Target Frame)
+                    "base_footprint",      # 源坐标系 (Source Frame)
+                    rgb_msg.header.stamp,  # 时间戳 (必须与图像时间戳对齐)
+                    rospy.Duration(0.1)    # 超时时间
+                )
+                # 拿到 transform 后，你可以进行坐标转换
+                # 2. 获取 x, y 坐标
+                x = transform.transform.translation.x
+                y = transform.transform.translation.y
+                
+                # 3. 获取四元数并转换为欧拉角
+                quat = transform.transform.rotation
+                # euler_from_quaternion 返回 (roll, pitch, yaw)
+                euler = tf.transformations.euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
+                theta = euler[2]  # yaw 角即为机器人当前的航向角 (单位: 弧度)
+
+                # 4. 打印或使用坐标
+                rospy.loginfo(f"Robot Position: x={x:.2f}, y={y:.2f}, theta={theta/3.1415*180:.2f} degree")
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+                rospy.logwarn("TF lookup failed")
+            
             
             with torch.no_grad():
                 feed_dict = {'img_data': img_data.unsqueeze(0).cuda(self.gpu)}
@@ -121,8 +155,12 @@ if __name__ == '__main__':
     rospy.init_node('ros_segmentation_node', anonymous=True)
     node = ROSSegmentationNode(cfg, args.gpu)
     
-    # 订阅使用 ROSImage 别名
-    rospy.Subscriber(args.topic, ROSImage, node.callback, queue_size=1)
+    image_sub = message_filters.Subscriber("/rgb/image_raw", ROSImage)
+    depth_sub = message_filters.Subscriber("/depth/image_raw", ROSImage)
+    # 同步器: slop=0.1 表示允许 100ms 的时间差
+    ts = message_filters.ApproximateTimeSynchronizer([image_sub, depth_sub], queue_size=10, slop=0.1)
+    ts.registerCallback(node.callback)
+
     
     rospy.loginfo(f"Node started, listening on {args.topic}")
     rospy.spin()
