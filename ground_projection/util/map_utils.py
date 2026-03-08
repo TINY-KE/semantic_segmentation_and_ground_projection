@@ -109,10 +109,10 @@ def est_occ_from_depth(local3D, grid_dim, cell_size, device, occupancy_height_th
 # sseg_labels：语义类别总数（例如 27）；
 # grid_dim：输出网格的尺寸，如 (284, 284)；
 # cell_size：每个网格单元代表的真实世界长度（单位：米）。
-def ground_projection_my(points2D, local3D, sseg, sseg_labels, grid_dim, cell_size):
+def ground_projection_my_old(points2D, local3D, sseg, sseg_labels, grid_dim, cell_size):
     ego_grid_sseg = torch.zeros((sseg.shape[0], sseg_labels, grid_dim[0], grid_dim[1]), dtype=torch.float32, device='cuda')
     # 逐帧处理每一个时间步。
-    print("sseg.shape[0]: ",sseg.shape[0] )
+    # print("sseg.shape[0]: ",sseg.shape[0] )
     for i in range(sseg.shape[0]): # sequence length
         # 当前帧的语义分割图；
         sseg_step = sseg[i,:,:,:].unsqueeze(0) # 1 x 1 x H x W
@@ -120,6 +120,14 @@ def ground_projection_my(points2D, local3D, sseg, sseg_labels, grid_dim, cell_si
         points2D_step = points2D[i]
         # 对应的相机系下的 3D 坐标。
         local3D_step = local3D[i]
+
+        # 找到标签不为 0 的索引
+        u = points2D_step[:, 0].long()
+        v = points2D_step[:, 1].long()
+        u = torch.clamp(u, 0, sseg_step.shape[2] - 1)
+        v = torch.clamp(v, 0, sseg_step.shape[1] - 1)
+        point_labels = sseg_step[0, v, u]  # [N]
+        valid_mask = point_labels > 0
 
         # # 抛弃距离相机太近（< 0.5m）或太远（> 3m）的点；
         # depth = local3D_step[:, 0]
@@ -129,13 +137,14 @@ def ground_projection_my(points2D, local3D, sseg, sseg_labels, grid_dim, cell_si
 
         # 抛弃 y 轴高度 > 2 米的点（如天花板、吊灯等）；
         h = local3D_step[:, 2]
-        valid_inds = torch.nonzero(torch.where(h < 2, 1, 0)).squeeze(dim=1)
+        height_mask = h < 2
+        valid_inds = torch.nonzero(valid_mask & height_mask).squeeze(dim=1)
         local3D_step = local3D_step[valid_inds, :]
         points2D_step = points2D_step[valid_inds, :]
 
         # 将 (x, z) 坐标映射到网格坐标 (i, j)。
         # FIXME: map_coords的维度为 [H*W, 2]
-        map_coords = discretize_coords(x=local3D_step[:,0], z=local3D_step[:,1], grid_dim=grid_dim, cell_size=cell_size)
+        map_coords = discretize_coords(x=-1*local3D_step[:,1], z=-1*local3D_step[:,0], grid_dim=grid_dim, cell_size=cell_size)
 
         # 将每个像素的语义标签统计到对应网格格子中。 label_pooling() 的作用是统计每个格子中出现的语义标签种类，生成类别概率分布。
         # FIXME: grid_sseg的维度为 [C, H, W]
@@ -146,6 +155,68 @@ def ground_projection_my(points2D, local3D, sseg, sseg_labels, grid_dim, cell_si
 
     return ego_grid_sseg
 
+
+def ground_projection_my(points2D, local3D, sseg, sseg_labels, grid_dim, cell_size):
+    # 自动识别输入数据的设备 (cuda/cpu)
+    device = sseg.device
+    ego_grid_sseg = torch.zeros((sseg.shape[0], sseg_labels, grid_dim[0], grid_dim[1]),
+                                dtype=torch.float32, device=device)
+
+    for i in range(sseg.shape[0]):  # 逐帧处理 sequence length
+        # 1. 获取当前帧并压缩维度至 [H, W]，确保索引返回 [N] 而不是 [1, N] 或 [N, N]
+        # sseg[i] 原本可能是 [1, H, W]
+        current_sseg = sseg[i].squeeze()
+        if current_sseg.dim() > 2:
+            current_sseg = current_sseg[0]  # 确保拿到的是二维图
+
+        points2D_step = points2D[i]  # [N, 2]
+        local3D_step = local3D[i]  # [N, 3]
+
+        # 2. 获取像素坐标并 clamp 防止越界
+        u = points2D_step[:, 0].long()
+        v = points2D_step[:, 1].long()
+        u = torch.clamp(u, 0, current_sseg.shape[1] - 1)
+        v = torch.clamp(v, 0, current_sseg.shape[0] - 1)
+
+        # 3. 提取每个 3D 点对应的语义标签
+        # 此时 point_labels 的形状为 [N]
+        point_labels = current_sseg[v, u]
+        valid_mask = point_labels > 0
+
+        # 4. 高度过滤掩码：抛弃 y 轴高度 > 2 米的点
+        # 根据你的 local3D 结构，索引 2 通常对应高度轴 (Z 或 Y)
+        h = local3D_step[:, 2]
+        height_mask = h < 2
+
+        # 5. 合并掩码并提取有效点索引
+        # 这一步修复了之前的 RuntimeError: Size mismatch (1280 vs 26161)
+        combined_mask = valid_mask & height_mask
+        valid_inds = torch.nonzero(combined_mask).squeeze(dim=1)
+
+        # 6. 安全性检查：如果当前帧没有有效点（如全对着天花板），跳过处理
+        if valid_inds.numel() == 0:
+            continue
+
+        local3D_filtered = local3D_step[valid_inds, :]
+        points2D_filtered = points2D_step[valid_inds, :]
+
+        # 7. 将 (x, z) 坐标映射到网格坐标
+        # 注意：这里根据相机坐标系惯例，通常 x 是左/右，z 是前/后
+        map_coords = discretize_coords(
+            x=-1 * local3D_filtered[:, 1],
+            z=-1 * local3D_filtered[:, 0],
+            grid_dim=grid_dim,
+            cell_size=cell_size
+        )
+
+        # 8. 统计并池化：将语义标签填入 2D 网格
+        # 传入 sseg[i:i+1] 以保持 label_pooling 期望的 4D 输入 [1, 1, H, W]
+        grid_sseg = label_pooling(sseg[i:i + 1], points2D_filtered, map_coords, sseg_labels, grid_dim)
+
+        # 9. 存入结果序列
+        ego_grid_sseg[i] = grid_sseg
+
+    return ego_grid_sseg
 
 # 将来自图像的语义分割信息和深度信息，投影到地面网格上，构建一个语义概率地图（semantic grid map）。
 # 参数解释：

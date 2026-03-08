@@ -1,3 +1,30 @@
+Metadata-Version: 2.4
+Name: mit_semseg
+Version: 1.0.0
+Summary: Pytorch implementation for Semantic Segmentation/Scene Parsing on MIT ADE20K dataset
+Home-page: https://github.com/CSAILVision/semantic-segmentation-pytorch
+Author: MIT CSAIL
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: BSD License
+Classifier: Operating System :: OS Independent
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy
+Requires-Dist: torch>=0.4.1
+Requires-Dist: torchvision
+Requires-Dist: opencv-python
+Requires-Dist: yacs
+Requires-Dist: scipy
+Requires-Dist: tqdm
+Dynamic: author
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: summary
+
 # 安装方法
   <!-- + conda create -n seg_torch_env python=3.9 -y
   + conda activate seg_torch_env
@@ -7,11 +34,10 @@
 
   conda create -n semseg python=3.9
   conda activate semseg_2
-  pip install numpy==1.26.4 numpy-quaternion==2023.0.4 # 使用以上版本
   pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu118
   pip install -e .
   conda install matplotlib
- pip install numpy-quaternion
+
 # 多机器人分布
   + 修改两个电脑的bashrc
       export ROS_MASTER_URI=http://192.168.4.56:11311

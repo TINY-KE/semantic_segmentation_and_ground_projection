@@ -55,8 +55,8 @@ class SimpleSegmentationDataset(Dataset):
         self.images = self.data["images"]    # (N, 3, H, W)
         self.ssegs = self.data["ssegs"]    # (N, H, W) or (N, 1, H, W)
         self.depth_imgs = self.data["depth_imgs"]    # (N, H, W) or (N, 1, H, W)
-        self.abs_poses = self.data["abs_pose"]    # (N, H, W) or (N, 1, H, W)
-        self.step_ego_grid_27 = self.data["step_ego_grid_27"]   # (N, 27, 64, 64)
+        self.camera_pose = self.data["camera_pose"]    # (N, H, W) or (N, 1, H, W)
+        # self.step_ego_grid_27 = self.data["step_ego_grid_27"]   # (N, 27, 64, 64)
 
 
     def __len__(self):
@@ -66,12 +66,12 @@ class SimpleSegmentationDataset(Dataset):
         image = torch.from_numpy(self.images[idx])           # (3, H, W)
         sseg = torch.from_numpy(self.ssegs[idx])             # (H, W) or (1, H, W)
         depth_img = torch.from_numpy(self.depth_imgs[idx])             # (H, W) or (1, H, W)
-        abs_pose = self.abs_poses[idx]
-        step_ego_grid_27 = torch.from_numpy(self.step_ego_grid_27[idx])
-        print("abs_pose: ", abs_pose)
-        print("abs_pose type: ", abs_pose.dtype)
-        print("step_ego_grid_27.shape: ", step_ego_grid_27.shape)
-        print("step_ego_grid_27.type: ", step_ego_grid_27.type)
+        camera_pose = self.camera_pose[idx]
+        # step_ego_grid_27 = torch.from_numpy(self.step_ego_grid_27[idx])
+        # print("camera_pose: ", camera_pose)
+        # print("camera_pose type: ", camera_pose.dtype)
+        # print("step_ego_grid_27.shape: ", step_ego_grid_27.shape)
+        # print("step_ego_grid_27.type: ", step_ego_grid_27.type)
 
         if sseg.ndim == 3:
             print(f"[❌ 错误] sseg.ndim == 3")
@@ -80,8 +80,8 @@ class SimpleSegmentationDataset(Dataset):
             "image": image,
             "sseg": sseg,
             "depth_img": depth_img,
-            "abs_pose": abs_pose,
-            "step_ego_grid_27": step_ego_grid_27
+            "camera_pose": camera_pose
+            # "step_ego_grid_27": step_ego_grid_27
         }
 
 # ----------------------------
@@ -106,7 +106,7 @@ def visualize_image_and_sseg(item, timestep=0):
     image = item["image"]
     sseg = item["sseg"]
     depth = item["depth_img"]
-    step_ego_grid_27 = item["step_ego_grid_27"]
+    # step_ego_grid_27 = item["step_ego_grid_27"]
 
     # --- 修正 RGB 图像维度 ---
     rgb_tensor = image.detach().cpu()
@@ -133,13 +133,13 @@ def visualize_image_and_sseg(item, timestep=0):
     depth_color = cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET)  # (H, W, 3)
 
     # ego语义栅格图
-    ego_grid = step_ego_grid_27.argmax(axis=0)
-    print(f"ego_grid shape: {ego_grid.shape}")
-    print(f"ego_grid unique values: {np.unique(ego_grid)}")
-    print(f"ego_grid min: {ego_grid.min()}, max: {ego_grid.max()}")
-    print(f"ego_grid dtype: {ego_grid.dtype}")
-    print(f"ego_grid sample values: {ego_grid.flatten()[:10]}")
-    ego_vis = viz_utils.colorEncode(ego_grid)
+    # ego_grid = step_ego_grid_27.argmax(axis=0)
+    # print(f"ego_grid shape: {ego_grid.shape}")
+    # print(f"ego_grid unique values: {np.unique(ego_grid)}")
+    # print(f"ego_grid min: {ego_grid.min()}, max: {ego_grid.max()}")
+    # print(f"ego_grid dtype: {ego_grid.dtype}")
+    # print(f"ego_grid sample values: {ego_grid.flatten()[:10]}")
+    # ego_vis = viz_utils.colorEncode(ego_grid)
 
     # --- 可视化 ---
     fig, axs = plt.subplots(1, 3, figsize=(30, 10))
@@ -151,8 +151,8 @@ def visualize_image_and_sseg(item, timestep=0):
     axs[1].set_title("Semantic Segmentation")
     axs[1].axis("off")
 
-    axs[2].imshow(ego_vis)
-    axs[2].set_title("ego_vis Image")
+    axs[2].imshow(depth_color)
+    axs[2].set_title("depth Image")
     axs[2].axis("off")
 
 
@@ -164,34 +164,35 @@ def visualize_image_and_sseg(item, timestep=0):
 # ----------------------------
 if __name__ == "__main__":
     # npz_file_path = "/home/robotlab/work/semantic-segmentation-pytorch/save_results/all_data.npz"
-    npz_file_path = "/home/robotlab/work/semantic-segmentation-pytorch/save_results/virtual_robot_outputs.npz"
+    # npz_file_path = "/home/robotlab/work/semantic-segmentation-pytorch/save_results/virtual_robot_outputs.npz"
+    npz_file_path = "/home/robotlab/work/semantic-segmentation-pytorch/save_results/temp/all_data.npz"
     # 直接加载检查
     data = np.load(npz_file_path)
-    step_ego_grid_27_all = data["step_ego_grid_27"]
-    print(f"step_ego_grid_27_all 形状: {step_ego_grid_27_all.shape}")
+    # step_ego_grid_27_all = data["step_ego_grid_27"]
+    # print(f"step_ego_grid_27_all 形状: {step_ego_grid_27_all.shape}")
 
-    # 检查第一个样本
-    first_sample = step_ego_grid_27_all[0]  # 形状应该是 (27, 64, 64)
-    print(f"第一个样本的形状: {first_sample.shape}")
+    # # 检查第一个样本
+    # first_sample = step_ego_grid_27_all[0]  # 形状应该是 (27, 64, 64)
+    # print(f"第一个样本的形状: {first_sample.shape}")
 
-    # 检查是否所有值都相同
-    print(f"第一个样本的统计:")
-    print(f"  min: {first_sample.min()}, max: {first_sample.max()}")
-    print(f"  mean: {first_sample.mean()}, std: {first_sample.std()}")
+    # # 检查是否所有值都相同
+    # print(f"第一个样本的统计:")
+    # print(f"  min: {first_sample.min()}, max: {first_sample.max()}")
+    # print(f"  mean: {first_sample.mean()}, std: {first_sample.std()}")
 
-    # 检查是否所有通道的值都相同
-    print("\n检查通道0是否全为1:")
-    channel0 = first_sample[0]
-    print(f"  通道0: min={channel0.min()}, max={channel0.max()}")
-    print(f"  是否全为1: {np.all(channel0 == 1.0)}")
-
-    print("\n检查其他通道是否全为0:")
-    for i in range(1, 27):
-        channel_i = first_sample[i]
-        if not np.all(channel_i == 0.0):
-            print(f"  通道{i}: 不全是0! min={channel_i.min()}, max={channel_i.max()}")
-        elif i <= 3:  # 只显示前几个通道的信息
-            print(f"  通道{i}: 全是0")
+    # # 检查是否所有通道的值都相同
+    # print("\n检查通道0是否全为1:")
+    # channel0 = first_sample[0]
+    # print(f"  通道0: min={channel0.min()}, max={channel0.max()}")
+    # print(f"  是否全为1: {np.all(channel0 == 1.0)}")
+    #
+    # print("\n检查其他通道是否全为0:")
+    # for i in range(1, 27):
+    #     channel_i = first_sample[i]
+    #     if not np.all(channel_i == 0.0):
+    #         print(f"  通道{i}: 不全是0! min={channel_i.min()}, max={channel_i.max()}")
+    #     elif i <= 3:  # 只显示前几个通道的信息
+    #         print(f"  通道{i}: 全是0")
 
     dataset = SimpleSegmentationDataset(npz_file_path)
 

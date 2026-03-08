@@ -1,7 +1,10 @@
 #!/bin/bash
 
 # Image names
-IMG_ROOT=/home/robotlab/dataset/living_room_traj2n_frei_png
+#IMG_ROOT=/home/robotlab/dataset/living_room_traj2n_frei_png
+#IMG_ROOT=/media/robotlab/WD_BLACK/RuiHaiJiaYuan/mylivingroom
+#IMG_ROOT=/media/robotlab/WD_BLACK/binzhou/wjli_home
+IMG_ROOT=/media/robotlab/WD_BLACK/binzhou/binzhou_wjl_home_2
 ASSOCIATION_FILE_NAME=associations_smp.txt
 
 # model names

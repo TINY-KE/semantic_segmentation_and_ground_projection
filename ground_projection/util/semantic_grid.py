@@ -120,7 +120,7 @@ class SemanticGrid(object):
     import torch
     import torch.nn.functional as F
 
-    def transform_global_to_ego_single(self, grid, abs_pose):
+    def transform_global_to_ego_single2(self, grid, abs_pose):
         """
         将单帧 world 坐标下地图变换到当前 ego 坐标系下。
 
@@ -143,10 +143,10 @@ class SemanticGrid(object):
         theta = abs_pose[2]
 
         # 计算平移（world → ego 坐标：先移再逆旋）
-        trans_x = -2 * (x / self.cell_size) / H
-        trans_y = -2 * (y / self.cell_size) / W
+        trans_x = -1 * (x / self.cell_size) / (H/2)  # -1 是因为你在做反向变换（world → ego）
+        trans_y = -1 * (y / self.cell_size) / (W/2)
 
-        # 平移矩阵
+        # 构造平移仿射矩阵
         trans_theta = torch.tensor([
             [1, 0, trans_x],
             [0, 1, trans_y]
@@ -159,11 +159,65 @@ class SemanticGrid(object):
         ], dtype=torch.float32, device=grid.device).unsqueeze(0)
 
         # 先平移，再旋转
+        print("transform_global_to_ego_single： ", [trans_x, trans_y])
         trans_grid = F.affine_grid(trans_theta, grid.size(), align_corners=False)
         grid_translated = F.grid_sample(grid, trans_grid, align_corners=False)
 
-        rot_grid = F.affine_grid(rot_theta, grid.size(), align_corners=False)
-        ego_grid = F.grid_sample(grid_translated, rot_grid, align_corners=False)
+        # FIXME: zhjd 取消旋转
+        return grid_translated  # 返回 [1, C, H, W]
+        # rot_grid = F.affine_grid(rot_theta, grid.size(), align_corners=False)
+        # ego_grid = F.grid_sample(grid_translated, rot_grid, align_corners=False)
+        #
+        # return ego_grid  # 返回 [1, C, H, W]
+
+    import torch.nn.functional as F
+
+    def transform_global_to_ego_single(self, grid, abs_pose):
+        """
+        参数：
+            grid: Tensor [C, H, W]
+            abs_pose: [x, y, theta] -- x是物理纵向(前), y是物理横向(左)
+        """
+        grid = grid.unsqueeze(0)  # [1, C, H, W]
+        C, H, W = grid.shape[1:]
+        device = grid.device
+
+        # 1. 提取物理坐标 (单位：米)
+        x = abs_pose[0]      # 图片高度方向
+        y = abs_pose[1]      # 图片宽度方向
+        theta = abs_pose[2]
+
+        # 2. 计算归一化平移量 (重点！)
+        # 物理 X (前后) 对应图像的垂直轴 (Height) -> 控制 ty
+        # 物理 Y (左右) 对应图像的水平轴 (Width)  -> 控制 tx
+        # 公式：(物理位移 / 分辨率) / (总像素的一半)
+
+        # 注意：这里符号要根据你的 Global 坐标系方向调整。
+        # 通常如果机器人向上走(x正)，采样点要向下移，所以符号是正。
+        norm_tx = -1*(y / self.cell_size) / (W / 2)  # y<0, 则tx > 0，采样中心向右移动。
+        # norm_tx = 0  # debug 关闭横向移动
+        norm_ty = -1*(x / self.cell_size) / (H / 2)  # x<0, 则ty > 0，采样中心向下移动。
+        # norm_ty = 0  # debug 关闭竖向移动
+
+        # theta = 0.0  # debug 关闭旋转
+        cos_t = torch.cos(-theta)
+        sin_t = torch.sin(-theta)
+
+        # 3. 构造平移矩阵 [1, 2, 3]
+        # 第一行控制 X采样(W方向)，第二行控制 Y采样(H方向)
+        trans_matrix = torch.tensor([
+            [cos_t, -sin_t, norm_tx],
+            [sin_t, cos_t, norm_ty]
+        ], dtype=torch.float32, device=device).unsqueeze(0)
+
+        # print(f"DEBUG: 机器人地面位置 ({x:.2f}, {y:.2f}) -> 归一化偏移 ({横向移动:.4f}, {纵向移动:.4f})")
+
+        # 4. 执行变换
+        grid_size = grid.size()
+        af_grid = F.affine_grid(trans_matrix, grid_size, align_corners=False)
+
+        # 使用 bilinear 插值，并在边缘填充 0 (void)
+        ego_grid = F.grid_sample(grid, af_grid, mode='bilinear', padding_mode='zeros', align_corners=False)
 
         return ego_grid  # 返回 [1, C, H, W]
 

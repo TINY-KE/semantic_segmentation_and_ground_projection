@@ -6,23 +6,7 @@ import numpy as np
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point
 
-# # 图像尺寸与相机内参
-# Camera.fx: 481.20
-# Camera.fy: 480.00
-# Camera.cx: 319.50
-# Camera.cy: 239.50
-# # camera
-# Camera.width: 640
-# Camera.height: 480
-# # Deptmap values factor
-# DepthMapFactor: 5000  #对应
-W = 640
-H = 480
-fx = 481.20
-fy = -480.00
-cx = 319.50
-cy = 239.50
-DepthMapFactor = 5000.0
+
 
 # 颜色映射（类别 ID → RGB）
 color_mapping_27 = {

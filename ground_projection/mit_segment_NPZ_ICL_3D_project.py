@@ -25,76 +25,22 @@ from mit_semseg.lib.utils import as_numpy
 from PIL import Image
 from tqdm import tqdm
 from mit_semseg.config import cfg
-from ground_projection.util import viz_utils, map_utils, utils, load_slam_dataset
+from ground_projection.util import viz_utils, map_utils, utils, load_slam_dataset, Id_Converter
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point
 import rospy
-from ground_projection.publish3D_util import publish3D_rviz
+from ground_projection.publish3D_util.publish3D_rviz import publish3D
 
 # old_idx → new_idx 映射表（只包含有效项）
-DEFAULT_NEW_IDX = 0  # 默认类别（void）
-# old_to_new_idx = {
-#     20: 1,    # 椅子
-#     31: 1,
-#     76: 1,
-#     111: 1,
-#     15: 2,    # 门
-#     34: 3,    # 桌子
-#     16: 3,
-#     65: 3,
-#     40: 4,    # 靠垫cushion
-#     58: 4,
-#     24: 5,    # 沙发
-#     8: 6,     # 床
-#     # 18: 7,    # 植物
-#     # 48: 8,    # 水槽
-#     90: 10,   # 电视
-#     # 146: 11,  # shower 淋浴
-#     38: 12,   # 浴缸 bathtub
-#     46: 13,   # 柜台 counter
-#     71: 13,
-#     100: 13,
-#     1: 15,    # 墙 structure
-#     # 4: 17,    # 地板 free-space
-#     # 14: 17,
-#     # 23: 18,   # 画
-#     11: 19,   # 橱柜 cabinet
-#     # 50: 23,   # 壁炉 fireplace
-#     # 82: 22    # 毛巾 towel
-# }
+scene_type = "binzhou_wjl"
+old_to_new_idx = Id_Converter.get_Id_Converter(scene_type)
+DEFAULT_NEW_IDX = Id_Converter.DEFAULT_NEW_IDX
+flag_visualize_result = False  # 保存本地图片
+# flag_visualize_result = True  # 保存本地图片
+flag_3D_rviz = True
+# flag_3D_rviz = False
 
-# 注意old idx需要减一
-old_to_new_idx = {
-    20: 1,    # 椅子
-    31: 1,
-    76: 1,
-    111: 1,
-    15: 2,    # 门
-    34: 3,    # 桌子
-    16: 3,
-    65: 3,
-    40: 4,    # 靠垫cushion
-    58: 4,
-    24: 5,    # 沙发
-    8: 6,     # 床
-    18: 7,    # 植物
-    48: 8,    # 水槽
-    90: 10,   # 电视
-    146: 11,  # shower 淋浴
-    38: 12,   # 浴缸 bathtub
-    46: 13,   # 柜台 counter
-    71: 13,
-    100: 13,
-    1: 15,    # 墙 structure
-    4: 17,    # 地板 free-space
-    14: 17,
-    29: 17,
-    95: 17,
-    23: 18,   # 画
-    11: 19,   # 橱柜 cabinet
-    50: 23,   # 壁炉 fireplace
-    82: 22    # 毛巾 towel
-}
+
 
 color_mapping_27 = {
     0:  (255, 255, 255),   # 白色 white                       空类别 / 无类别 (void)
@@ -171,6 +117,7 @@ def inference(segmentation_module, loader, gpu):
     all_imgs = []
     all_ssegs = []
     all_depths = []
+    all_actual_poses = []  # ✨ 新增：存储与图像一一对应的位姿
 
     #  tqdm 进度条
     pbar = tqdm(total=len(loader))
@@ -179,11 +126,16 @@ def inference(segmentation_module, loader, gpu):
     segmentation_module.eval()
 
     # 遍历测试数据集
-    for batch_data in loader:
+    for i, batch_data in enumerate(loader):
         # process data
         # 每次从 DataLoader 中取出一个 batch（实际上这里是每次只处理一张图）
         # batch_data[0] 是真正的图像数据（因为使用了 user_scattered_collate）
         batch_data = batch_data[0]
+
+        # ✨ 核心：由于 loader 顺序与 cfg.list_rgbd 一致，直接按索引取位姿
+        current_pose = cfg.list_rgbd[i]['pose']
+        all_actual_poses.append(current_pose)
+
         # img_ori 是原始图像（numpy 数组）
         # segSize 是原图的尺寸 (H, W)，用于模型输出 resize
         # [zhjd-debug] 说明在输入进segmentation_module之前，先把图像变成正方形。
@@ -238,15 +190,16 @@ def inference(segmentation_module, loader, gpu):
             all_depths.append(depth_ori)
 
         # 保存为本地图片
-        visualize_result(
-            (batch_data['img_ori'], batch_data['depth_ori'], batch_data['info']),
-            pred,
-            cfg
-        )
+        if flag_visualize_result:
+            visualize_result(
+                (batch_data['img_ori'], batch_data['depth_ori'], batch_data['info']),
+                pred,
+                cfg
+            )
 
         pbar.update(1)  #更新进度条
 
-    return all_imgs, all_depths, all_ssegs
+    return all_imgs, all_depths, all_ssegs, all_actual_poses
 
 
 def SegmentationModuleNet(cfg, gpu):
@@ -300,10 +253,11 @@ def SegmentationModuleNet(cfg, gpu):
 
     # Main loop
     #  8. 执行推理
-    all_imgs, all_depths, all_ssegs = inference(segmentation_module, loader_test, gpu)
+    all_imgs, all_depths, all_ssegs, all_actual_poses = inference(segmentation_module, loader_test, gpu)
     print('Inference done!')
 
     # 保存所有图像到一个 NPZ 文件
+    print('正在保存NPZ文件!')
     #     # work2: ['abs_pose', 'ego_grid_crops_spatial', 'step_ego_grid_crops_spatial', 'gt_grid_crops_spatial', 'gt_grid_crops_objects',
     #     'images', 'ssegs', 'depth_imgs', 'pred_ego_crops_sseg', 'step_ego_grid_27']
     save_path = os.path.join(cfg.TEST.result, "all_data.npz")
@@ -311,9 +265,9 @@ def SegmentationModuleNet(cfg, gpu):
                         images=np.stack(all_imgs),  # (N, H, W, 3)
                         ssegs=np.stack(all_ssegs),
                         depth_imgs=np.stack(all_depths),
-                        camera_pose=np.stack(cfg.poses)
+                        camera_pose=np.stack(all_actual_poses)
                         )  # (N, H, W)
-    print(f"\n✅ Saved SSEG PNG to: {save_path}")
+    print(f"\n✅ Saved NPZ 文件 to: {save_path}")
 
 
 
@@ -347,13 +301,13 @@ if __name__ == '__main__':
         help="path to associations.txt",
         type=str,
     )
-    parser.add_argument(
-        "--pose_groundtruth",
-        default="associations.txt",
-        metavar="FILE",
-        help="path to pose_groundtruth.txt",
-        type=str,
-    )
+    # parser.add_argument(
+    #     "--pose_groundtruth",
+    #     default="associations.txt",
+    #     metavar="FILE",
+    #     help="path to pose_groundtruth.txt",
+    #     type=str,
+    # )
     parser.add_argument(
         "--cfg",
         default="config/ade20k-resnet50dilated-ppm_deepsup.yaml",
@@ -406,28 +360,75 @@ if __name__ == '__main__':
 
     # 获取位置信息
     poses_file = args.imgs_root + '/' + 'KeyFrames_for_smp.txt'
-    cfg.valid_timestamps, cfg.poses  = load_slam_dataset.load_poses_from_file(poses_file, skip_every_n=10)
+
+    if scene_type == "ICL":
+        skip_steps = 5
+        type_name = "ICL"
+        time_threshold = 0.01
+    elif scene_type == "binzhou_wjl":
+        skip_steps = 1
+        type_name = "KINECT_DK"
+        time_threshold = 0.04
+    else:
+        # 注意：如果走到这里，skip_steps 和 type_name 没有定义，
+        # 后面打印会报错，所以建议给个默认值或直接退出。
+        skip_steps = None
+        type_name = "UNKNOWN"
+        time_threshold = 0.01
+        print(f"Error, scene_type 报错: {scene_type}")
+
+    # 在逻辑块外打印
+    print(f"当前场景类型: {type_name}")
+    print(f"每隔 {skip_steps} 从KeyFrames_for_smp.txt中读取一个时间戳")
+    print(f"associations_smp.txt匹配时间的最大阈值为 {time_threshold} 秒")
+    input("[1] 请按回车键继续程序... \n\n")
+
+    cfg.valid_timestamps, cfg.poses  = load_slam_dataset.load_poses_from_file(poses_file, skip_every_n=skip_steps)
+    input("[2] 请按回车键继续程序... \n\n")
     for time, pose in zip(cfg.valid_timestamps, cfg.poses):
         print(f"VALID  time={time}, pose={pose}")
+    input("[2-1] 请按回车键继续程序... \n\n")
+
 
     # 从association文件中读取图片
     associations_file = args.imgs_root + '/' + args.association
-    cfg.list_rgbd = load_slam_dataset.load_pairs_from_association_file(associations_file, args.imgs_root, cfg.valid_timestamps)
+    if type_name == "ICL":
+        cfg.list_rgbd = load_slam_dataset.load_pairs_from_association_file(associations_file, args.imgs_root, cfg.valid_timestamps, cfg.poses, order_depth_rgb=True, time_threshold=time_threshold)
+    elif type_name == "KINECT_DK":
+        cfg.list_rgbd = load_slam_dataset.load_pairs_from_association_file(associations_file, args.imgs_root, cfg.valid_timestamps, cfg.poses, order_depth_rgb=False, time_threshold=time_threshold)
+    else:
+        print("Error, type_name报错")
+    input("[3] 请按回车键继续程序... \n\n")
+
     print("cfg.valid_timestamps: ", cfg.valid_timestamps)
     # print("[zhjd-debug] cfg.list_depth:", cfg.list_depth)
     # print("[zhjd-debug] cfg.list_rgb:  ", cfg.list_rgb)
 
     default_marker_id = 0
 
-    for time, pose, depth_path in zip(cfg.valid_timestamps, cfg.poses, [f["fpath_depth"] for f in cfg.list_rgbd]):
-        print(f"VALID  time={time}, pose={pose}, image={depth_path}")
-        # 在rviz中显示无语义点云
-        publish3D_rviz.publish3D_from_depth_path(depth_path, pose)
+    if flag_3D_rviz == True:
+        publish3D_rviz = publish3D(camera_type=type_name)
+        for item in cfg.list_rgbd:
+            # 提取时间戳和深度图路径
+            time = item['timestamp']
+            depth_path = item['fpath_depth']
+            rgb_path = item['fpath_rgb']
+            # 找到该时间戳对应的位姿索引
+            idx = cfg.valid_timestamps.index(time)
+            pose = cfg.poses[idx]
 
+            print(f"Publish3D  time={time}, pose={pose}, image={depth_path}")
+
+            # 在rviz中显示无语义点云
+            default_marker_id += 1
+            # publish3D_rviz.publish3D_from_depth_path(marker_pub, depth_path, pose, default_marker_id)
+            publish3D_rviz.publish3D_from_depth_rgb_path(marker_pub, depth_path, rgb_path, pose, default_marker_id)
+
+    # 保存结果的地方
     if not os.path.isdir(cfg.TEST.result):
         os.makedirs(cfg.TEST.result)
 
-    # 调用main函数，开始推理
-    SegmentationModuleNet(cfg, args.gpu)
+    # 调用main函数，开始推理，并保存本地NPZ
+    # SegmentationModuleNet(cfg, args.gpu)
 
     print("     [zhjd-debug] 结果的保存地址: ", cfg.TEST.result)

@@ -23,73 +23,10 @@ from mit_semseg.lib.utils import as_numpy
 from PIL import Image
 from tqdm import tqdm
 from mit_semseg.config import cfg
-from ground_projection.util import viz_utils, map_utils, utils
+from ground_projection.util import viz_utils, map_utils, utils, Id_Converter
 
-# old_idx → new_idx 映射表（只包含有效项）
-DEFAULT_NEW_IDX = 0  # 默认类别（void）
-# old_to_new_idx = {
-#     20: 1,    # 椅子
-#     31: 1,
-#     76: 1,
-#     111: 1,
-#     15: 2,    # 门
-#     34: 3,    # 桌子
-#     16: 3,
-#     65: 3,
-#     40: 4,    # 靠垫cushion
-#     58: 4,
-#     24: 5,    # 沙发
-#     8: 6,     # 床
-#     # 18: 7,    # 植物
-#     # 48: 8,    # 水槽
-#     90: 10,   # 电视
-#     # 146: 11,  # shower 淋浴
-#     38: 12,   # 浴缸 bathtub
-#     46: 13,   # 柜台 counter
-#     71: 13,
-#     100: 13,
-#     1: 15,    # 墙 structure
-#     # 4: 17,    # 地板 free-space
-#     # 14: 17,
-#     # 23: 18,   # 画
-#     11: 19,   # 橱柜 cabinet
-#     # 50: 23,   # 壁炉 fireplace
-#     # 82: 22    # 毛巾 towel
-# }
-
-# 注意old idx需要减一
-old_to_new_idx = {
-    20: 1,    # 椅子
-    31: 1,
-    76: 1,
-    111: 1,
-    15: 2,    # 门
-    34: 3,    # 桌子
-    16: 3,
-    65: 3,
-    40: 4,    # 靠垫cushion
-    58: 4,
-    24: 5,    # 沙发
-    8: 6,     # 床
-    18: 7,    # 植物
-    48: 8,    # 水槽
-    90: 10,   # 电视
-    146: 11,  # shower 淋浴
-    38: 12,   # 浴缸 bathtub
-    46: 13,   # 柜台 counter
-    71: 13,
-    100: 13,
-    1: 15,    # 墙 structure
-    4: 17,    # 地板 free-space
-    14: 17,
-    29: 17,
-    95: 17,
-    23: 18,   # 画
-    11: 19,   # 橱柜 cabinet
-    50: 23,   # 壁炉 fireplace
-    82: 22    # 毛巾 towel
-}
-
+old_to_new_idx = Id_Converter.get_Id_Converter("binzhou_wjl")
+DEFAULT_NEW_IDX = Id_Converter.DEFAULT_NEW_IDX
 color_mapping_27 = {
     0:  (255, 255, 255),   # 白色 white                       空类别 / 无类别 (void)
     1:  (128, 128, 0),     # 橄榄色 olive                     椅子 (chair)
@@ -127,7 +64,7 @@ def extract_number(fpath):
     """提取文件名中数字部分作为排序依据"""
     base = os.path.basename(fpath)           # e.g. "126.png"
     name, _ = os.path.splitext(base)         # "126"
-    return int(name)                         # 转成整数进行排序
+    return float(name)                         # 转成整数进行排序
 
 def get_sorted_numeric_filenames(folder_path):
     filenames = os.listdir(folder_path)
@@ -252,14 +189,14 @@ def inference(segmentation_module, loader, gpu):
 
         pbar.update(1)  #更新进度条
 
-    # 保存所有图像到一个 NPZ 文件
-    #     # work2: ['abs_pose', 'ego_grid_crops_spatial', 'step_ego_grid_crops_spatial', 'gt_grid_crops_spatial', 'gt_grid_crops_objects',
-    #     'images', 'ssegs', 'depth_imgs', 'pred_ego_crops_sseg', 'step_ego_grid_27']
-    save_path = os.path.join(cfg.TEST.result, "all_data.npz")
-    np.savez_compressed(save_path,
-                        imgs=np.stack(all_imgs),  # (N, H, W, 3)
-                        ssegs=np.stack(all_ssegs))  # (N, H, W)
-    print(f"\n✅ Saved all data to: {save_path}")
+    # # 保存所有图像到一个 NPZ 文件
+    # #     # work2: ['abs_pose', 'ego_grid_crops_spatial', 'step_ego_grid_crops_spatial', 'gt_grid_crops_spatial', 'gt_grid_crops_objects',
+    # #     'images', 'ssegs', 'depth_imgs', 'pred_ego_crops_sseg', 'step_ego_grid_27']
+    # save_path = os.path.join(cfg.TEST.result, "all_data.npz")
+    # np.savez_compressed(save_path,
+    #                     imgs=np.stack(all_imgs),  # (N, H, W, 3)
+    #                     ssegs=np.stack(all_ssegs))  # (N, H, W)
+    # print(f"\n✅ Saved all data to: {save_path}")
 
 
 def SegmentationModuleNet(cfg, gpu):
@@ -394,7 +331,8 @@ if __name__ == '__main__':
         imgs = [args.imgs]
     assert len(imgs), "imgs should be a path to image (.jpg) or directory."
     imgs.sort(key=extract_number)       # ✅ 排序：根据文件名中的数字排序
-    cfg.list_test = [{'fpath_img': x} for x in imgs]
+    imgs_sampled = imgs[::20]  # [::5] 表示从第 0 帧开始，每隔 5 帧取一张 (0, 5, 10, 15...)
+    cfg.list_test = [{'fpath_img': x} for x in imgs_sampled]
 
     image_names = get_sorted_numeric_filenames(args.imgs)
     print("     [zhjd-debug] cfg.list_test: ",cfg.list_test)
