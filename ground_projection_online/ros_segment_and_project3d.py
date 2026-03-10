@@ -16,6 +16,8 @@ import torch
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import time # 在文件开头添加 import time
 import argparse
+import threading  # 新增：线程库
+import queue      # 新增：队列（线程安全）
 # Numerical libs
 from mit_semseg.models import ModelBuilder, SegmentationModule
 from mit_semseg.utils import colorEncode
@@ -32,7 +34,7 @@ import rospy
 from sensor_msgs import point_cloud2
 from std_msgs.msg import Header
 from ground_projection.publish3D_util.publish3D_rviz import publish3D
-from ground_projection.publish3D_util.SemanticMapPublisher import SemanticMarkerPublisher
+from ground_projection.publish3D_util.SemanticMapPublisher import SemanticMarkerPublisher, AsyncSemanticMarkerPublisher
 from visualization_msgs.msg import Marker
 
 
@@ -49,6 +51,9 @@ color_mapping_27 = {
     24: (245, 245, 220), 25: (139, 69, 19), 26: (64, 224, 208)
 }
 colors_27 = np.array([color_mapping_27[i] for i in sorted(color_mapping_27.keys())], dtype=np.uint8)
+
+
+
 
 class ROSSegmentationNode:
     def __init__(self, cfg, gpu):
@@ -82,7 +87,8 @@ class ROSSegmentationNode:
         self.crop_size = (64, 64)
         self.sg = SemanticGrid(1, self.grid_dim, self.crop_size[0], self.cell_size,
                       spatial_labels=self.spatial_labels, object_labels=self.object_labels)
-        self.semantic_map_publisher = SemanticMarkerPublisher()
+
+        self.semantic_map_publisher = AsyncSemanticMarkerPublisher(marker_topic="/semantic_global_map")
 
         # --- 预生成ID映射数组 ---
         # 找到old_to_new_idx中的最大旧ID（确定映射数组长度）
@@ -198,8 +204,8 @@ class ROSSegmentationNode:
             points_world_tensor = points_world_rot + trans_world_cam
             # 转回CPU（仅最后一步）
             points_world = points_world_tensor.cpu().numpy()
-            flag_rviz = False
-            if flag_rviz:
+            flag_rviz_3dpoint = False
+            if flag_rviz_3dpoint:
                 # 发布点云到 RViz， 用于检查
                 default_marker_id = 1
                 if points_world.shape[0] > 10:
@@ -233,8 +239,16 @@ class ROSSegmentationNode:
             geo_semantic_sseg = ego_semantic_sseg_27
             step_geo_grid_sseg = self.sg.update_semantic_proj_grid_bayes(geo_grid=geo_semantic_sseg.unsqueeze(0))
             # print("step_geo_grid_sseg.shape: ", step_geo_grid_sseg.shape)  step_geo_grid_sseg.shape:  torch.Size([1, 1, 27, 200, 200])
-            self.semantic_map_publisher.publish_semantic_map(step_geo_grid_sseg.squeeze(0), res=0.1, origin_x=-10.0, origin_y=-10.0, height=-0.5)
 
+            flag_rviz_2dmap = False
+            if flag_rviz_2dmap:
+                self.semantic_map_publisher.async_publish_semantic_map(
+                    step_geo_grid_sseg.squeeze(0),  # 去掉批次维度，变成 [1, 27, 200, 200]
+                    res=0.1, 
+                    origin_x=-10.0, 
+                    origin_y=-10.0, 
+                    height=-0.5
+                )
 
 
 
@@ -242,6 +256,7 @@ class ROSSegmentationNode:
             # --- 帧率计算逻辑 ---
             curr_time = time.time()
             dt = curr_time - self.prev_time
+
             self.fps = 1.0 / dt if dt > 0 else 0.0
             self.prev_time = curr_time
             print(f"FPS: 【{self.fps:.2f}】 | Unique predictions: {np.unique(pred)} \n\n")

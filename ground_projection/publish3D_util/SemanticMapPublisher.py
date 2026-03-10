@@ -5,8 +5,10 @@ import torch
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point
 from std_msgs.msg import ColorRGBA
-
-# -------------------------- 修复后的语义Marker发布器（适配你的配色） --------------------------
+import threading  # 新增：线程库
+import queue      # 新增：队列（线程安
+        
+# -------------------------- 语义Marker发布器（适配你的配色） --------------------------
 class SemanticMarkerPublisher:
     def __init__(self, marker_topic="/semantic_ego_markers"):
         """
@@ -127,6 +129,52 @@ class SemanticMarkerPublisher:
         # 4. 发布Marker
         self.pub.publish(marker)
         rospy.loginfo(f"已发布Ego语义地图：共 {len(points)} 个栅格点")
+
+# -------------------------- 异步语义地图发布器 --------------------------
+class AsyncSemanticMarkerPublisher(SemanticMarkerPublisher):
+    def __init__(self, marker_topic="/semantic_ego_markers", queue_size=5):
+        # 关键修复：父类仅传 marker_topic，num_classes 无需传递（固定27类）
+        super().__init__(marker_topic=marker_topic)
+        self.publish_queue = queue.Queue(maxsize=queue_size)
+        self.is_running = True
+        self.publish_thread = threading.Thread(target=self._async_publish_worker, daemon=True)
+        self.publish_thread.start()
+        rospy.loginfo("异步语义地图发布线程已启动")
+
+    def _async_publish_worker(self):
+        """子线程发布逻辑"""
+        while self.is_running and not rospy.is_shutdown():
+            try:
+                data = self.publish_queue.get(timeout=1.0)
+                ego_grid_sseg, res, origin_x, origin_y, height = data
+                super().publish_semantic_map(ego_grid_sseg, res, origin_x, origin_y, height)
+                self.publish_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                rospy.logerr(f"异步发布失败：{e}")
+                import traceback
+                rospy.logerr(traceback.format_exc())
+
+    def async_publish_semantic_map(self, ego_grid_sseg, res=0.1, origin_x=-10.0, origin_y=-10.0, height=-0.5):
+        """主线程非阻塞发布"""
+        try:
+            if self.publish_queue.full():
+                try:
+                    self.publish_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self.publish_queue.put_nowait((ego_grid_sseg, res, origin_x, origin_y, height))
+        except Exception as e:
+            rospy.logerr(f"放入发布队列失败：{e}")
+
+    def stop(self):
+        """停止异步线程"""
+        self.is_running = False
+        if self.publish_thread.is_alive():
+            self.publish_thread.join(timeout=2.0)
+        rospy.loginfo("异步语义地图发布线程已停止")
+
 
 
 # -------------------------- 测试用例（单独运行时） --------------------------
