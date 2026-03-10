@@ -14,6 +14,7 @@
   pip install numpy-quaternion
   pip install rospkg
   pip install yacs
+  pip install numpy-quaternion
 
 # 多机器人分布
   + 修改两个电脑的bashrc

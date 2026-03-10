@@ -19,6 +19,16 @@ camera_intrinsics = {
         "cy": 377.167164,
         "depth_factor": 5000.0
     }
+    ,
+    "KINECT_DK_ROS": {
+        "width": 1280,
+        "height": 720,
+        "fx": 614.918291,
+        "fy": 617.128471,
+        "cx": 635.265398,
+        "cy": 377.167164,
+        "depth_factor": 1.0
+    }
 }
 
 

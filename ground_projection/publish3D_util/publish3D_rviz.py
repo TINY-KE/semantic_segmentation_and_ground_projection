@@ -27,7 +27,7 @@ color_mapping_27 = {
 class publish3D:
     def __init__(self, camera_type="KINECT_DK"):
         # self.marker_pub = rospy.Publisher("/visualization_marker", Marker, queue_size=10)
-        self.W, self.H, self.fx, self.fy, self.cx, self.cy, self.DepthMapFactor = camera_intrinsics.get_intrinsics("KINECT_DK")
+        self.W, self.H, self.fx, self.fy, self.cx, self.cy, self.DepthMapFactor = camera_intrinsics.get_intrinsics(camera_type)
 
     def filter_depth_edges(self, depth, threshold=0.2):
         """过滤深度图边缘的异常跳变（高梯度）"""
@@ -104,7 +104,7 @@ class publish3D:
         return np.stack((x, y, z), axis=-1), u, v  # shape: (N, 3)
 
 
-    def depth_to_pointcloud_camera(self, depth):
+    def depth_to_pointcloud_camera_origin(self, depth):
         edge_mask = self.filter_depth_edges(depth, threshold=0.2)
         voxel_mask = self.depth_voxel_mask(depth, voxel_size=4) # 每两个像素保留一个
         final_mask = voxel_mask
@@ -128,6 +128,39 @@ class publish3D:
 
         return np.stack((x, y, z), axis=-1), u, v
 
+    def depth_to_pointcloud_camera(self, depth):
+        """
+        加速版：向量化计算，提前过滤无效深度，无for循环
+        :param depth: 深度图（float32，米）
+        :return: (N,3)点云, u/v坐标
+        """
+        # 1. 提前过滤无效深度（NaN/0/超出量程），减少后续计算量
+        valid_depth_mask = np.isfinite(depth) & (depth > 0.2) & (depth < 10.0)  # Kinect有效量程
+        if not np.any(valid_depth_mask):
+            return np.empty((0,3)), np.array([]), np.array([])
+        
+        # 2. 向量化生成u/v网格（替代meshgrid+循环）
+        h, w = depth.shape
+        v_valid, u_valid = np.where(valid_depth_mask)  # 直接获取有效像素坐标
+        z_valid = depth[v_valid, u_valid]
+        
+        # 3. 向量化计算x/y（无循环）
+        x_valid = (u_valid - self.cx) * z_valid / self.fx
+        y_valid = (v_valid - self.cy) * z_valid / self.fy
+        
+        # 4. 堆叠点云（向量化操作）
+        points_cam = np.stack((x_valid, y_valid, z_valid), axis=-1)
+        
+        # 5. 可选：点云采样（限制最大数量，进一步加速）
+        max_points = 3000  # 720p下3000点足够，可根据需求调整
+        if len(points_cam) > max_points:
+            sample_idx = np.random.choice(len(points_cam), max_points, replace=False)
+            points_cam = points_cam[sample_idx]
+            u_valid = u_valid[sample_idx]
+            v_valid = v_valid[sample_idx]
+        
+        return points_cam, u_valid, v_valid
+
     def transform_pointcloud_to_world(self, points, rot, trans):
         points_world = points @  rot.T + trans
         return points_world
@@ -148,7 +181,13 @@ class publish3D:
         return points_firstFrameCoordinate
 
     def publish_marker_pointcloud(self, marker_pub, points, marker_id=0, color=(0.0, 1.0, 0.0), scale=0.05):
-        """使用 visualization_msgs/Marker 发布点云为小球列表"""
+        # 1. 采样逻辑 (放在循环外，或者在传入前处理)
+        treshold = 10000
+        if points.shape[0] > treshold:
+            # print(f"   RVIZ 点云发布： Point cloud has {points.shape[0]} points, sampling down to {treshold} for RViz visualization.")
+            indices = np.random.choice(points.shape[0], treshold, replace=False)
+            points = points[indices]
+
         marker = Marker()
         marker.header.frame_id = "map"
         marker.header.stamp = rospy.Time.now()
@@ -161,17 +200,17 @@ class publish3D:
         marker.scale.y = scale
         marker.scale.z = scale
 
-        marker.color.r = color[0]
-        marker.color.g = color[1]
-        marker.color.b = color[2]
-        marker.color.a = 1.0
+        marker.color.r, marker.color.g, marker.color.b, marker.color.a = color[0], color[1], color[2], 1.0
 
-        for x, y, z in points:
-            pt = Point(x=float(x), y=float(y), z=float(z))
-            marker.points.append(pt)
+        # 2. 高效转换：使用列表推导式替代 for 循环
+        # 这比手动 append 循环快数倍
+        marker.points = [Point(x=float(p[0]), y=float(p[1]), z=float(p[2])) for p in points]
 
-        marker.lifetime = rospy.Duration(0)
+        # marker.lifetime = rospy.Duration(0) 
+        marker.lifetime = rospy.Duration(0) # 建议设置寿命，避免 RViz 缓冲区溢出
         marker_pub.publish(marker)
+
+        print(f"Published marker with ID {marker_id}, containing {len(points)} points, color: {color}, scale: {scale}")
 
     def Publish3D(self):
         rospy.init_node("semantic_pointcloud_publisher")
