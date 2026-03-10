@@ -32,6 +32,7 @@ import rospy
 from sensor_msgs import point_cloud2
 from std_msgs.msg import Header
 from ground_projection.publish3D_util.publish3D_rviz import publish3D
+from ground_projection.publish3D_util.SemanticMapPublisher import SemanticMarkerPublisher
 from visualization_msgs.msg import Marker
 
 
@@ -81,7 +82,8 @@ class ROSSegmentationNode:
         self.crop_size = (64, 64)
         self.sg = SemanticGrid(1, self.grid_dim, self.crop_size[0], self.cell_size,
                       spatial_labels=self.spatial_labels, object_labels=self.object_labels)
-        
+        self.semantic_map_publisher = SemanticMarkerPublisher()
+
         # --- 预生成ID映射数组 ---
         # 找到old_to_new_idx中的最大旧ID（确定映射数组长度）
         max_old_id = max(old_to_new_idx.keys(), default=0)
@@ -218,18 +220,20 @@ class ROSSegmentationNode:
             ssegs_3 = torch.from_numpy(ssegs_3).float().to("cuda")
 
             # 六、地面投影，构建单帧语义栅格地图
-            ego_semantic_sseg_27 = map_utils.ground_projection_my(
+            ego_semantic_sseg_27 = map_utils.ground_projection_ros(
                 points2D, local3D, ssegs_3,
                 sseg_labels=self.object_labels,
                 grid_dim=self.grid_dim,
                 cell_size=self.cell_size
             )  # shape: [t, 27, 184, 184]
-            # print("ego_grid_sseg_3.shape: ", ego_semantic_sseg_27.shape)
-            
+            # print("ego_semantic_sseg_27.shape: ", ego_semantic_sseg_27.shape)  ego_semantic_sseg_27.shape:  torch.Size([1, 27, 200, 200])
+            # self.semantic_map_publisher.publish_semantic_map(ego_semantic_sseg_27, res=0.1, origin_x=-10.0, origin_y=-10.0, height=-0.5)
 
             # # 七、累加到全局地图
-            # geo_semantic_sseg = ego_semantic_sseg_27
-            # step_geo_grid_sseg = self.sg.update_semantic_proj_grid_bayes(geo_grid=geo_semantic_sseg.unsqueeze(0))
+            geo_semantic_sseg = ego_semantic_sseg_27
+            step_geo_grid_sseg = self.sg.update_semantic_proj_grid_bayes(geo_grid=geo_semantic_sseg.unsqueeze(0))
+            # print("step_geo_grid_sseg.shape: ", step_geo_grid_sseg.shape)  step_geo_grid_sseg.shape:  torch.Size([1, 1, 27, 200, 200])
+            self.semantic_map_publisher.publish_semantic_map(step_geo_grid_sseg.squeeze(0), res=0.1, origin_x=-10.0, origin_y=-10.0, height=-0.5)
 
 
 

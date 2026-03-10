@@ -1,0 +1,151 @@
+#!/usr/bin/env python
+import rospy
+import numpy as np
+import torch
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import Point
+from std_msgs.msg import ColorRGBA
+
+# -------------------------- 修复后的语义Marker发布器（适配你的配色） --------------------------
+class SemanticMarkerPublisher:
+    def __init__(self, marker_topic="/semantic_ego_markers"):
+        """
+        初始化语义地图发布器（复用已初始化的ROS节点，不再重复init_node）
+        :param marker_topic: Marker发布的ROS话题名
+        """
+        # 关键修复：移除 rospy.init_node()，复用主程序已初始化的节点
+        if not rospy.core.is_initialized():
+            # 兜底：若主程序未初始化，才初始化（避免完全无节点的情况）
+            rospy.init_node('semantic_ego_marker_node', anonymous=True, disable_signals=True)
+        
+        # 初始化Publisher（复用现有节点）
+        self.pub = rospy.Publisher(marker_topic, Marker, queue_size=10)
+        self.rate = rospy.Rate(1)  # 1Hz发布频率
+        rospy.loginfo(f"Ego语义地图Marker发布器已启动，话题：{marker_topic}")
+        
+        # 加载你的27类配色（RGB 255 → 0-1浮点数，添加透明度）
+        self.color_palette = self._get_custom_semantic_colors()
+
+    def _get_custom_semantic_colors(self):
+        """
+        加载你的 color_mapping_27 配色表
+        转换规则：RGB(255,255,255) → (1.0,1.0,1.0)，透明度固定为0.8
+        """
+        # 你的原始配色（RGB 255格式）
+        color_mapping_27 = {
+            0: (255, 255, 255), 1: (128, 128, 0), 2: (0, 0, 255), 3: (255, 0, 0), 
+            4: (255, 0, 255), 5: (0, 255, 255), 6: (255, 165, 0), 7: (255, 255, 0), 
+            8: (128, 128, 128), 9: (128, 0, 0), 10: (255, 20, 147), 11: (0, 128, 0), 
+            12: (128, 0, 128), 13: (0, 128, 128), 14: (0, 0, 128), 15: (210, 105, 30), 
+            16: (188, 143, 143), 17: (0, 255, 0), 18: (255, 215, 0), 19: (0, 0, 0), 
+            20: (192, 192, 192), 21: (138, 43, 226), 22: (255, 127, 80), 23: (238, 130, 238), 
+            24: (245, 245, 220), 25: (139, 69, 19), 26: (64, 224, 208)
+        }
+        
+        # 转换为ROS Marker需要的格式：(R/255, G/255, B/255, 透明度)
+        colors = []
+        for idx in range(27):
+            r, g, b = color_mapping_27[idx]
+            # 转换为0-1浮点数，透明度固定为0.8（可根据需要调整）
+            colors.append((r/255.0, g/255.0, b/255.0, 0.8))
+        
+        return np.array(colors)
+
+    def ego_grid_to_semantic_map(self, ego_grid_sseg):
+        """
+        将Ego语义栅格（概率分布）转换为类别索引数组
+        ego_grid_sseg: torch张量 [1, 27, H, W] 或 numpy数组 [27, H, W]
+        返回: numpy数组 [H, W] (0-26)
+        """
+        # 1. 处理张量/数组兼容
+        if isinstance(ego_grid_sseg, torch.Tensor):
+            semantic_grid = ego_grid_sseg.cpu().numpy()
+        else:
+            semantic_grid = ego_grid_sseg
+        
+        # 2. 去除批次维度（若有）
+        if semantic_grid.ndim == 4:  # [1,27,H,W]
+            semantic_grid = semantic_grid.squeeze(0)
+        
+        # 3. 取每个栅格概率最大的类别
+        semantic_grid = np.argmax(semantic_grid, axis=0)
+        return semantic_grid
+
+    def publish_semantic_map(self, ego_grid_sseg, res=0.1, origin_x=-15.0, origin_y=-15.0, height=0.0):
+        """
+        发布Ego语义地图到RViz
+        :param ego_grid_sseg: Ego语义栅格（torch/numpy，概率分布）
+        :param res: 栅格分辨率（米/像素）
+        :param origin_x/y: Ego地图原点（世界坐标，默认居中）
+        :param height: Marker的Z轴高度（贴地设0.0）
+        """
+        # 1. 转换为类别索引数组
+        semantic_grid = self.ego_grid_to_semantic_map(ego_grid_sseg)
+        H, W = semantic_grid.shape
+        rospy.logdebug(f"发布Ego语义地图：尺寸 {H}x{W}，分辨率 {res}m")
+
+        # 2. 创建Marker（CUBE_LIST类型，贴地显示）
+        marker = Marker()
+        marker.header.frame_id = "map"  # 对应RViz的map坐标系
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "ego_semantic_map"
+        marker.id = 0
+        marker.type = Marker.CUBE_LIST
+        marker.action = Marker.ADD
+        marker.scale.x = res       # 栅格宽度（米）
+        marker.scale.y = res       # 栅格高度（米）
+        marker.scale.z = 0.02      # 厚度（贴地设薄）
+        marker.pose.orientation.w = 1.0  # 无旋转
+
+        # 3. 批量添加栅格点（优化性能，避免逐点循环）
+        points = []
+        colors = []
+        for cat in range(27):
+            # 找到该类别的所有栅格坐标
+            y_indices, x_indices = np.where(semantic_grid == cat)
+            if len(y_indices) == 0:
+                continue
+            
+            # 转换为世界坐标（Ego地图→世界坐标）
+            px = x_indices * res + origin_x
+            py = y_indices * res + origin_y
+
+            # 批量添加点和颜色
+            for x, y in zip(px, py):
+                points.append(Point(x, y, height))
+                color_rgba = ColorRGBA(
+                    self.color_palette[cat, 0],
+                    self.color_palette[cat, 1],
+                    self.color_palette[cat, 2],
+                    self.color_palette[cat, 3]
+                )
+                colors.append(color_rgba)
+
+        marker.points = points
+        marker.colors = colors
+
+        # 4. 发布Marker
+        self.pub.publish(marker)
+        rospy.loginfo(f"已发布Ego语义地图：共 {len(points)} 个栅格点")
+
+
+# -------------------------- 测试用例（单独运行时） --------------------------
+if __name__ == '__main__':
+    try:
+        # 初始化发布器（此时会初始化节点，因为是单独运行）
+        pub = SemanticMarkerPublisher()
+        
+        # 模拟Ego语义栅格（替换为你的实际Ego地图）
+        H, W = 300, 300
+        ego_grid_sseg = torch.rand(1, 27, H, W)  # 模拟概率分布
+
+        # 循环发布
+        rate = rospy.Rate(1)  # 1Hz
+        while not rospy.is_shutdown():
+            pub.publish_semantic_map(ego_grid_sseg, res=0.1, origin_x=-15.0, origin_y=-15.0, height=0.0)
+            rate.sleep()
+
+    except rospy.ROSInterruptException:
+        rospy.loginfo("Ego语义地图发布器已停止")
+    except Exception as e:
+        rospy.logerr(f"发布失败：{e}")
