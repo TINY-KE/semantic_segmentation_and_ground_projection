@@ -216,7 +216,7 @@ class ROSSegmentationNode:
             # 有效点云对应的语义分割像素点
             ssegs_3 = sseg[np.newaxis, np.newaxis, :, :]  # (1, 1, H, W)
             ssegs_3 = torch.from_numpy(ssegs_3).float().to("cuda")
-            
+
             # 六、地面投影，构建单帧语义栅格地图
             ego_semantic_sseg_27 = map_utils.ground_projection_my(
                 points2D, local3D, ssegs_3,
@@ -225,7 +225,7 @@ class ROSSegmentationNode:
                 cell_size=self.cell_size
             )  # shape: [t, 27, 184, 184]
             # print("ego_grid_sseg_3.shape: ", ego_semantic_sseg_27.shape)
-
+            
 
             # # 七、累加到全局地图
             # geo_semantic_sseg = ego_semantic_sseg_27
@@ -240,7 +240,7 @@ class ROSSegmentationNode:
             dt = curr_time - self.prev_time
             self.fps = 1.0 / dt if dt > 0 else 0.0
             self.prev_time = curr_time
-            print(f"FPS: 【{self.fps:.2f}】 | Unique predictions: {np.unique(pred)}")
+            print(f"FPS: 【{self.fps:.2f}】 | Unique predictions: {np.unique(pred)} \n\n")
 
             # # 这里执行可视化逻辑...
             

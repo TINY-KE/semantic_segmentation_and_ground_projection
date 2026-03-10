@@ -218,6 +218,7 @@ def ground_projection_my(points2D, local3D, sseg, sseg_labels, grid_dim, cell_si
 
     return ego_grid_sseg
 
+
 # 将来自图像的语义分割信息和深度信息，投影到地面网格上，构建一个语义概率地图（semantic grid map）。
 # 参数解释：
 # points2D：每一帧的像素点坐标，形状为 [T, N, 2]，表示图像中每个 3D 点对应的像素位置；
