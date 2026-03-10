@@ -111,9 +111,7 @@ class ROSSegmentationNode:
                 pred = as_numpy(pred.squeeze(0).cpu())
             
             
-            # # 保存结果
-            # save_path = os.path.join(self.cfg.TEST.result, f"{msg.header.seq}.png")
-            # PILImage.fromarray(im_vis).save(save_path)
+            
                         
 
             # --- 帧率计算逻辑 ---
@@ -124,11 +122,14 @@ class ROSSegmentationNode:
             print(f"FPS: 【{self.fps:.2f}】 | Unique predictions: {np.unique(pred)}")
 
             # 这里执行可视化逻辑...
-            # pred_new = np.vectorize(lambda x: old_to_new_idx.get(x + 1, DEFAULT_NEW_IDX))(pred)
-            # pred_color = colorEncode(pred_new, colors_27).astype(np.uint8)
-            # im_vis = np.concatenate((img_ori, pred_color), axis=1)
+            pred_new = np.vectorize(lambda x: old_to_new_idx.get(x + 1, DEFAULT_NEW_IDX))(pred)
+            pred_color = colorEncode(pred_new, colors_27).astype(np.uint8)
+            im_vis = np.concatenate((img_ori, pred_color), axis=1)
             # cv2.imshow("ROS Segmentation", cv2.cvtColor(im_vis, cv2.COLOR_RGB2BGR))
             # cv2.waitKey(1)
+            # 保存结果
+            save_path = os.path.join(self.cfg.TEST.result, f"{rgb_msg.header.seq}.png")
+            PILImage.fromarray(im_vis).save(save_path)
 
         except Exception as e:
             rospy.logerr(f"Inference error: {e}")

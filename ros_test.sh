@@ -53,7 +53,7 @@ echo "编码器: $ENCODER"
 echo "解码器: $DECODER"
 
 # 设置结果保存目录
-RESULT_DIR="./save_results/ros_segmentation2"
+RESULT_DIR="./save_results/ros_segmentation_online"
 if [ ! -d $RESULT_DIR ]; then
   mkdir -p $RESULT_DIR
   echo "创建结果保存目录: $RESULT_DIR"
@@ -89,7 +89,7 @@ echo "结果保存到: $RESULT_DIR"
 
 
 # 运行语义分割节点
-python3 -u ground_projection/ros_segment.py \
+python3 -u ground_projection_online/ros_segment_and_project3d.py \
   --topic "$ROS_IMAGE_TOPIC" \
   --cfg config/ade20k-resnet50dilated-ppm_deepsup.yaml \
   --gpu 0 \
