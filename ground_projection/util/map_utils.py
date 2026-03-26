@@ -218,13 +218,63 @@ def ground_projection_my(points2D, local3D, sseg, sseg_labels, grid_dim, cell_si
 
     return ego_grid_sseg
 
-def ground_projection_ros(points2D, local3D, sseg, sseg_labels, grid_dim, cell_size):
+def label_pooling_with_priority_ros(sseg, points2D, map_coords, sseg_labels, grid_dim):
+    """
+    带优先级的语义标签池化：当多个物体投影到同一栅格时，按优先级竞争概率。
+    """
+    # 1. 定义优先级权重 (数值越大越优先)
+    # 基础权重设为 10
+    priority_map = torch.full((sseg_labels,), 10.0, device='cuda') 
+    # 设置核心物体的极高优先级
+    priority_map[3] = 100.0   # Table (桌子) > 其他
+    priority_map[1] = 80.0    # Chair (椅子)
+    priority_map[2] = 60.0    # Door (门)
+    priority_map[15] = 40.0   # Structure (墙)
+    priority_map[17] = 40.0   # Free-space (地面/边界)
+
+    # 初始化网格：极小值填充以保持数值稳定
+    grid = torch.full((sseg_labels, grid_dim[0], grid_dim[1]), 1e-6, device='cuda')
+
+    if map_coords.shape[0] == 0:
+        return grid
+
+    # 提取图像中的语义标签
+    pix_x, pix_y = points2D[:, 0].long(), points2D[:, 1].long()
+    pix_lbl = sseg[0, 0, pix_y, pix_x]
+
+    # 获取所有被点命中的唯一网格坐标
+    uniq_rows = torch.unique(map_coords, dim=0)
+
+    for i in range(uniq_rows.shape[0]):
+        ucoord = uniq_rows[i, :]
+        # 找出所有落入当前格子的点索引
+        ind = torch.nonzero((map_coords == ucoord).all(axis=1)).squeeze(dim=1)
+        
+        # 提取这些点的标签并查询其优先级
+        bin_lbls = pix_lbl[ind].long()
+        bin_priorities = priority_map[bin_lbls]
+        
+        # 确定该栅格内的胜出者 (Winner)
+        max_prio_idx = torch.argmax(bin_priorities)
+        winner_label = bin_lbls[max_prio_idx]
+        
+        # 构建分配策略：Winner 分配 0.9，其余类别平分 0.1
+        hist = torch.full((sseg_labels,), 0.1 / (sseg_labels - 1), device='cuda')
+        hist[winner_label] = 0.9
+        
+        # 将该分布写入网格单元 [C, H, W]
+        grid[:, ucoord[1], ucoord[0]] = hist
+        
+    return grid
+
+def ground_projection_ros(points2D, local3D, sseg, sseg_labels, grid_dim, cell_size, height_to_filter=1.40):
+
     # 自动识别输入数据的设备 (cuda/cpu)
     device = sseg.device
     ego_grid_sseg = torch.zeros((sseg.shape[0], sseg_labels, grid_dim[0], grid_dim[1]),
                                 dtype=torch.float32, device=device)
 
-    for i in range(sseg.shape[0]):  # 逐帧处理 sequence length
+    for i in range(sseg.shape[0]):  # 逐帧处理 sequence length， 但在ros中，sseg.shape[0]是1，因为每次处理一帧图像
         # 1. 获取当前帧并压缩维度至 [H, W]，确保索引返回 [N] 而不是 [1, N] 或 [N, N]
         # sseg[i] 原本可能是 [1, H, W]
         current_sseg = sseg[i].squeeze()
@@ -245,10 +295,9 @@ def ground_projection_ros(points2D, local3D, sseg, sseg_labels, grid_dim, cell_s
         point_labels = current_sseg[v, u]
         valid_mask = point_labels > 0
 
-        # 4. 高度过滤掩码：抛弃 y 轴高度 > 2 米的点
-        # 根据你的 local3D 结构，索引 2 通常对应高度轴 (Z 或 Y)
-        h = local3D_step[:, 2]
-        height_mask = h < 2
+        # 4. 高度过滤掩码：抛弃 y 轴高度 > 1.2 米的点
+        h = local3D_step[:, 2]   # 索引 2 通常对应高度轴 (Z 或 Y)
+        height_mask = h < height_to_filter  
 
         # 5. 合并掩码并提取有效点索引
         # 这一步修复了之前的 RuntimeError: Size mismatch (1280 vs 26161)
@@ -263,7 +312,7 @@ def ground_projection_ros(points2D, local3D, sseg, sseg_labels, grid_dim, cell_s
         points2D_filtered = points2D_step[valid_inds, :]
 
         # 7. 将 (x, z) 坐标映射到网格坐标
-        # 注意：这里根据相机坐标系惯例，通常 x 是左/右，z 是前/后
+        # 注意：这里根据相机坐标系惯例，通常 x 是朝右，z 是朝前， y是朝下
         map_coords = discretize_coords_ros(
             x=local3D_filtered[:, 0],
             y=local3D_filtered[:, 1],
@@ -273,7 +322,7 @@ def ground_projection_ros(points2D, local3D, sseg, sseg_labels, grid_dim, cell_s
 
         # 8. 统计并池化：将语义标签填入 2D 网格
         # 传入 sseg[i:i+1] 以保持 label_pooling 期望的 4D 输入 [1, 1, H, W]
-        grid_sseg = label_pooling(sseg[i:i + 1], points2D_filtered, map_coords, sseg_labels, grid_dim)
+        grid_sseg = label_pooling_with_priority_ros(sseg[i:i + 1], points2D_filtered, map_coords, sseg_labels, grid_dim)
 
         # 9. 存入结果序列
         ego_grid_sseg[i] = grid_sseg

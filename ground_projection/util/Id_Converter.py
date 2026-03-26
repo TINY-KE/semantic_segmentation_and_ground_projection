@@ -128,6 +128,41 @@ old_to_new_idx_binzhou_wjl = {
     82: 22    # 毛巾 towel
 }
 
+old_to_new_idx_7_floor = {
+    20: 1,    # 椅子
+    31: 1,
+    76: 1,
+    111: 1,
+    15: 2,    # 门
+    34: 3,    # 桌子
+    16: 3,
+    65: 3,
+    8: 3,     # 原本是床，伪造为桌子
+    46: 3,   # 原本是柜台 counter，伪造为桌子
+    71: 3,   # 原本是柜台 counter，伪造为桌子
+    100: 3,   # 原本是柜台 counter，伪造为桌子
+    11: 3,   # 原本是橱柜 cabinet，伪造为桌子
+    24: 3,    # 原本是沙发
+
+    40: 4,    # 靠垫cushion
+    58: 4,
+    18: 7,    # 植物
+    48: 8,    # 水槽
+    66: 9,      # 马桶
+    90: 10,   # 电视
+    146: 11,  # shower 淋浴
+    38: 12,   # 浴缸 bathtub
+    
+    
+    1: 15,    # 墙 structure
+    19: 15,    # 墙 structure
+    4: 17,    # 地板 free-space
+    14: 17,
+    29: 17,
+    95: 17,
+    50: 23,   # 壁炉 fireplace
+    82: 22    # 毛巾 towel
+}
 
 
 # 参考  【金山文档 | WPS云文档】 color_coding_semantic_segmentation_classes  # https://www.kdocs.cn/l/ctMNlLgiSfOu
@@ -170,5 +205,7 @@ def get_Id_Converter(scene_type="binzhou_wjl"):
         return old_to_new_idx_binzhou_wjl
     elif scene_type == "ICL":
         return old_to_new_idx
+    elif scene_type == "7_floor":
+        return old_to_new_idx_7_floor
     else:
         return old_to_new_idx_origin

@@ -221,6 +221,103 @@ class SemanticGrid(object):
 
         return ego_grid  # 返回 [1, C, H, W]
 
+
+
+    def transform_global_to_ego_ros(self, grid, abs_pose):
+        """
+        参数：
+            grid: Tensor [C, H, W]
+            abs_pose: [x, y, theta] -- x是物理纵向(前), y是物理横向(左)
+        """
+        grid = grid.unsqueeze(0)  # [1, C, H, W]
+        C, H, W = grid.shape[1:]
+        device = grid.device
+
+        # 1. 提取物理坐标 (单位：米)
+        x = abs_pose[0]      # 图片高度方向
+        y = abs_pose[1]      # 图片宽度方向
+        theta = abs_pose[2]
+
+        # 2. 计算归一化平移量 (重点！)
+        # 物理 X (前后) 对应图像的垂直轴 (Height) -> 控制 ty
+        # 物理 Y (左右) 对应图像的水平轴 (Width)  -> 控制 tx
+        # 公式：(物理位移 / 分辨率) / (总像素的一半)
+
+        # 注意：这里符号要根据你的 Global 坐标系方向调整。
+        # 通常如果机器人向上走(x正)，采样点要向下移，所以符号是正。
+        norm_tx = 1*(x / self.cell_size) / (H / 2)  # y<0, 则tx > 0，采样中心向右移动。
+        # norm_tx = 0  # debug 关闭横向移动
+        norm_ty = 1*(y / self.cell_size) / (W / 2)  # x<0, 则ty > 0，采样中心向下移动。
+        # norm_ty = 0  # debug 关闭竖向移动
+
+        # theta = 0.0  # debug 关闭旋转
+        theta_tensor = torch.tensor(1*theta, dtype=torch.float32, device=self.device)
+        cos_t = torch.cos(theta_tensor)
+        sin_t = torch.sin(theta_tensor)
+
+        # 3. 构造平移矩阵 [1, 2, 3]
+        # 第一行控制 X采样(W方向)，第二行控制 Y采样(H方向)
+        trans_matrix = torch.tensor([
+            [cos_t, -sin_t, norm_tx],
+            [sin_t, cos_t, norm_ty]
+        ], dtype=torch.float32, device=device).unsqueeze(0)
+
+        # print(f"DEBUG: 机器人地面位置 ({x:.2f}, {y:.2f}) -> 归一化偏移 ({横向移动:.4f}, {纵向移动:.4f})")
+
+        # 4. 执行变换
+        grid_size = grid.size()
+        af_grid = F.affine_grid(trans_matrix, grid_size, align_corners=False)
+
+        # 使用 bilinear 插值，并在边缘填充 0 (void)
+        ego_grid = F.grid_sample(grid, af_grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+
+        return ego_grid  # 返回 [1, C, H, W]
+    
+    def transform_global_to_ego_ros_acc(self, grid, abs_pose):
+        """
+        参数：
+            grid: Tensor [C, H, W]
+            abs_pose: [x, y, theta] -- x是物理纵向(前), y是物理横向(左)
+        """
+        grid = grid.unsqueeze(0)  # [1, C, H, W]
+        C, H, W = grid.shape[1:]
+        device = grid.device
+
+        # 1. 提取物理坐标 (单位：米)
+        x = abs_pose[0]      # 图片高度方向
+        y = abs_pose[1]      # 图片宽度方向
+        theta = abs_pose[2]
+
+        # 2. 计算归一化平移量 (重点！)
+        norm_tx = 1*(x / self.cell_size) / (H / 2)  # y<0, 则tx > 0，采样中心向右移动。
+        norm_ty = 1*(y / self.cell_size) / (W / 2)  # x<0, 则ty > 0，采样中心向下移动。
+
+        # 3. 旋转计算
+        theta_tensor = torch.tensor(1*theta, dtype=torch.float32, device=self.device)
+        cos_t = torch.cos(theta_tensor)
+        sin_t = torch.sin(theta_tensor)
+
+        # 4. 构造平移矩阵 [1, 2, 3]
+        trans_matrix = torch.tensor([
+            [cos_t, -sin_t, norm_tx],
+            [sin_t, cos_t, norm_ty]
+        ], dtype=torch.float32, device=device).unsqueeze(0)
+
+        # 5. 执行变换（仅优化这部分！）
+        # 核心优化1：显式指定align_corners=False（默认值，但显式指定避免隐式转换）
+        af_grid = F.affine_grid(trans_matrix, grid.size(), align_corners=False)
+        # 核心优化2：grid_sample参数固化为最快配置
+        ego_grid = F.grid_sample(
+            grid, 
+            af_grid, 
+            mode='bilinear',        # bilinear是平衡速度和精度的最优选择（nearest更快但精度低）
+            padding_mode='zeros',   # zeros填充是最快的padding方式（border/reflection更慢）
+            align_corners=False     # 关键：False比True计算更快，且是主流默认值
+        )
+
+        return ego_grid  # 返回 [1, C, H, W]
+    
+    
     def update_sem_grid_bayes(self, geo_grid):
         # Input geo_grid -- B x T x num_of_classes x grid_dim x grid_dim
         # Update the class probabilities at each location of the grid using Bayes rule
@@ -283,7 +380,9 @@ class SemanticGrid(object):
             self.spatial_proj_grid = mul_proj_grid / normalization_grid.repeat(1, geo_grid.shape[2], 1, 1)
             step_geo_grid[:,i,:,:,:] = self.spatial_proj_grid.clone()
         return step_geo_grid
-
+    
+    
+    
     # 全局融合
     def update_semantic_proj_grid_bayes(self, geo_grid):
         # geo_grid 维度含义：[批次大小, 时间步, 类别数, 网格高, 网格宽]   通过print可知， size为[1, 1, 3, 384, 384]
@@ -344,3 +443,40 @@ class SemanticGrid(object):
         ego_pred_map[:,:, self.crop_start:self.crop_end, self.crop_start:self.crop_end] = prediction_crop.squeeze(0)
         geo_pred_map = self.mapTransformer(grid=ego_pred_map, pose=pose, abs_pose=abs_pose)
         self.update_sem_grid_bayes(geo_grid=geo_pred_map.unsqueeze(0)) # updates sg.sem_grid
+
+    # def update_sem_grid_bayes_with_weights(self, geo_grid):
+    #     # geo_grid -- B x T x num_of_classes x grid_dim x grid_dim
+    #     step_geo_grid = torch.zeros((geo_grid.shape[0], geo_grid.shape[1], self.object_labels,
+    #                                  self.grid_dim[0], self.grid_dim[1]), dtype=torch.float32).to(geo_grid.device)
+
+    #     # 1. 定义类别权重向量 (与 label_pooling 中的优先级对应)
+    #     # 规则：桌子(3) > 椅子(1) > 门(2) > 墙(15,17) > 其他
+    #     weights = torch.ones(self.object_labels, device=geo_grid.device)
+    #     weights[3] = 2.0*1.5  # Table: 极高权重，一旦看到就很难被抹除
+    #     weights[1] = 1.8*1.5  # Chair
+    #     weights[2] = 1.5*1.5  # Door
+    #     weights[15] = 1.2*1.5  # Structure
+    #     weights[17] = 1.2  # Free-space
+
+    #     # 将权重调整为适合矩阵运算的形状 [1, C, 1, 1]
+    #     weights_v = weights.view(1, -1, 1, 1)
+
+    #     for i in range(geo_grid.shape[1]):  # 遍历序列帧
+    #         # 获取当前帧观测
+    #         new_obsv_grid = geo_grid[:, i, :, :, :]
+
+    #         # 2. 对当前观测应用种类权重 (使用幂运算增强特定类别的对比度)
+    #         # 这样高置信度的类别在乘法后会占据更大的比例
+    #         weighted_obsv = torch.pow(new_obsv_grid, weights_v)
+
+    #         # 3. 贝叶斯融合：当前加权观测 * 历史累积地图
+    #         mul_probs_grid = weighted_obsv * self.sem_grid
+
+    #         # 4. 归一化，重新分布概率
+    #         normalization_grid = torch.sum(mul_probs_grid, dim=1, keepdim=True)
+    #         self.sem_grid = mul_probs_grid / (normalization_grid + 1e-12)  # 防止除零
+
+    #         # 5. 保存结果
+    #         step_geo_grid[:, i, :, :, :] = self.sem_grid.clone()
+
+    #     return step_geo_grid

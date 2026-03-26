@@ -289,17 +289,13 @@ def to_5d(t):
         t = t.unsqueeze(0)  # 在最前面添加一个新维度。例如原来是 (64, 64) → 变成 (1, 64, 64)
     return t
 
-fix_extract = 9
 
 # === 用 colorize_grid 上色 ===
 def color_and_extract(grid, color_mapping):
     colorized = colorize_grid(to_5d(grid), color_mapping=color_mapping)
     # 输出可能是 (3,H,W) 或 (1,3,H,W) 或 (1,1,3,H,W)
     colorized = torch.tensor(colorized)
-    if colorized.ndim == 5:
-        colorized = colorized[0, fix_extract]
-    elif colorized.ndim == 4:
-        colorized = colorized[fix_extract]
+    colorized = colorized[0, 0]
     # 现在 colorized 应为 (3,H,W)
     colorized.permute(1, 2, 0) # 转为 (H,W,3)
     colorized_border = add_border(colorized, color=(10, 10, 10), thickness=1)
@@ -390,3 +386,104 @@ def colorEncode(label_map):
         color_img[label_map == label_id] = color
 
     return color_img
+
+def save_only_Global_forROS(global_maps_objects, savepath, name):
+    """
+    以原分辨率保存全局地图（1像素=1栅格）
+    参数:
+        global_maps_objects: [1, 1, 27, H, W]
+        savepath: 保存路径
+        name: 文件名前缀
+    """
+    # 确保保存路径存在
+    os.makedirs(savepath, exist_ok=True)
+
+    # 1. 维度提取并转为 Numpy
+    # global_maps 形状: [B, T, 27, H, W]
+    global_maps = global_maps_objects.detach().cpu().numpy()
+    print(global_maps.shape)  # (1, 1, 27, 1000, 1000)
+    B, T, C, cH, cW = global_maps.shape
+
+    for t in range(T):
+        # 2. 提取当前帧 [27, H, W]
+        current_grid = global_maps[0, t]
+
+        # 3. 获取彩色图像
+        # 假设 color_and_extract 返回的是 [H, W, 3] 的 RGB 图像 (uint8 或 0-1 float)
+        img_rgb = color_and_extract(current_grid, 27)
+
+        # 4. 格式转换逻辑
+        # 如果 color_and_extract 返回的是 0-1 的 float，需要转为 0-255 uint8
+        if img_rgb.dtype != np.uint8:
+            img_rgb = (img_rgb * 255).astype(np.uint8)
+
+        # 5. 颜色空间转换 (RGB -> BGR)
+        # 因为 OpenCV 使用 BGR 格式保存
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+
+        # 6. 直接保存
+        # cv2.imwrite 会按照 img_bgr 的矩阵维度 (H, W) 创建图像文件
+        # 这确保了 120x600 的 Tensor 保存出来就是 120x600 像素的图片
+        save_file = os.path.join(savepath, f"{name}.png")
+        cv2.imwrite(save_file, img_bgr)
+
+    print(f"✅ 已按原分辨率({cW}x{cH})保存全局地图至: {save_file}")
+
+
+
+
+def load_Global_fromROS(image_path, color_mapping=color_mapping_27):
+    """
+    读取本地的 RGB 图像，并还原为 [1, 1, 27, H, W] 的语义地图 Tensor。
+    
+    参数:
+        image_path: 本地 png 图像路径
+        color_mapping: 颜色映射字典，默认为 color_mapping_27
+        
+    返回:
+        global_maps_objects: 形状为 [1, 1, 27, H, W] 的 FloatTensor
+    """
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"找不到图像文件: {image_path}")
+
+    # 1. 使用 OpenCV 读取图像 (默认 BGR 格式)
+    img_bgr = cv2.imread(image_path)
+    if img_bgr is None:
+        raise ValueError(f"无法读取图像文件，请检查文件是否损坏: {image_path}")
+        
+    # 2. 转换为 RGB 格式
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    H, W, _ = img_rgb.shape
+
+    # 3. 创建 2D 标签图 (初始化为 0，即 void 类别)
+    label_map = np.zeros((H, W), dtype=np.int64)
+
+    # 4. 颜色逆向匹配：遍历字典，将对应的 RGB 像素替换为类别 ID
+    for label_id, color in color_mapping.items():
+        # 寻找图像中与当前 color 完全一致的像素
+        # color 是一个 tuple, np.array(color) 转换为数组以便进行广播比较
+        mask = np.all(img_rgb == np.array(color), axis=-1)
+        label_map[mask] = label_id
+
+    # 注意：在保存图像时，你在 color_and_extract 内部调用了 add_border 添加了 (10, 10, 10) 的边框。
+    # 因为 (10, 10, 10) 不在 color_mapping_27 中，所以它会自动回退为我们在步骤 3 初始化的 0 (void 类别)。
+
+    # 5. 将 2D 标签图转为 27 通道的 One-Hot 张量 [27, H, W]
+    # 我们创建一个由 0.0 组成的浮点数组
+    num_classes = 27
+    grid = np.zeros((num_classes, H, W), dtype=np.float32)
+
+    for c in range(num_classes):
+        # 如果当前像素属于类别 c，对应通道设为 1.0
+        grid[c, :, :] = (label_map == c).astype(np.float32)
+
+    # 6. 扩充维度到 [1, 1, 27, H, W]
+    # np.expand_dims 可以在指定轴前增加维度
+    grid_5d = np.expand_dims(grid, axis=(0, 1))
+
+    # 7. 转为 PyTorch Tensor
+    global_maps_objects = torch.from_numpy(grid_5d)
+
+    print(f"✅ 已成功从图片恢复全局语义地图，形状: {global_maps_objects.shape}")
+    
+    return global_maps_objects

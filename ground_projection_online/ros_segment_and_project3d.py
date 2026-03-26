@@ -26,6 +26,7 @@ from PIL import Image as PILImage # 别名，解决命名冲突
 from mit_semseg.config import cfg
 from ground_projection.util import Id_Converter
 
+
 from ground_projection.util.semantic_grid import SemanticGrid
 from ground_projection.util import viz_utils, map_utils, utils, load_slam_dataset
 from sensor_msgs.msg import PointCloud2, PointField
@@ -36,10 +37,13 @@ from std_msgs.msg import Header
 from ground_projection.publish3D_util.publish3D_rviz import publish3D
 from ground_projection.publish3D_util.SemanticMapPublisher import SemanticMarkerPublisher, AsyncSemanticMarkerPublisher
 from visualization_msgs.msg import Marker
+from StepEgoMapPose_msgs.msg import StepEgoMapPose # 确保你已经编译了此消息包
+from std_msgs.msg import Float32, Float32MultiArray, MultiArrayDimension
 
 
 # 你的全局变量保持不变
-old_to_new_idx = Id_Converter.get_Id_Converter("binzhou_wjl")
+# old_to_new_idx = Id_Converter.get_Id_Converter("binzhou_wjl")
+old_to_new_idx = Id_Converter.get_Id_Converter("7_floor")
 DEFAULT_NEW_IDX = Id_Converter.DEFAULT_NEW_IDX
 color_mapping_27 = {
     0: (255, 255, 255), 1: (128, 128, 0), 2: (0, 0, 255), 3: (255, 0, 0), 
@@ -71,6 +75,7 @@ class ROSSegmentationNode:
         # 构建3D投影模型
         self.pub3d = publish3D(camera_type="KINECT_DK_ROS")
         self.marker_pub = rospy.Publisher("/pointcloud_world", Marker, queue_size=10)
+        self.step_ego_map_pose_pub = rospy.Publisher('/step_ego_map_pose', StepEgoMapPose, queue_size=10)
 
         # 构建语义分割模型
         self.net_encoder = ModelBuilder.build_encoder(arch=cfg.MODEL.arch_encoder, fc_dim=cfg.MODEL.fc_dim, weights=cfg.MODEL.weights_encoder)
@@ -82,7 +87,8 @@ class ROSSegmentationNode:
         # 语义栅格地图构建参数
         self.spatial_labels = 3
         self.object_labels = 27
-        self.grid_dim = (200, 200)
+        # self.grid_dim = (200, 200)
+        self.grid_dim = (1000, 1000)  # 7floor
         self.cell_size = 0.1
         self.crop_size = (64, 64)
         self.sg = SemanticGrid(1, self.grid_dim, self.crop_size[0], self.cell_size,
@@ -103,8 +109,21 @@ class ROSSegmentationNode:
 
         #  
         self.device = torch.device(f"cuda:{gpu}" if torch.cuda.is_available() else "cpu")
+        self.camera_height = 1.27  # 机械臂伸直
         # 预定义旋转矩阵（只初始化一次）
-        self.R_footprint_cam = torch.tensor([
+        self.R_footprint_cam_front = torch.tensor([
+            [0, 0, 1],   
+            [-1, 0, 0],  
+            [0, -1, 0]    
+        ], dtype=torch.float32, device=self.device)
+
+        self.R_footprint_cam_right = torch.tensor([
+            [-1, 0, 0],   
+            [0, 0, -1],  
+            [0, -1, 0]    
+        ], dtype=torch.float32, device=self.device)
+
+        self.R_footprint_cam_left = torch.tensor([
             [0, 0, 1],   
             [-1, 0, 0],  
             [0, -1, 0]    
@@ -117,8 +136,32 @@ class ROSSegmentationNode:
         img = (img - mean) / std
         return torch.from_numpy(img.transpose(2, 0, 1))
     
+    def visualize_with_scaled_display(self, img_ori, pred_new, display_scale=0.5):
+        """可视化语义分割结果，并缩小显示"""
+        # 生成颜色编码
+        pred_color = colorEncode(pred_new, colors_27).astype(np.uint8)
+        
+        # 拼接原图和预测图
+        im_vis = np.concatenate((img_ori, pred_color), axis=1)
+        
+        # 计算缩小后的尺寸
+        height, width = im_vis.shape[:2]
+        new_width = int(width * display_scale)
+        new_height = int(height * display_scale)
+        
+        # 缩小图像
+        im_vis_scaled = cv2.resize(im_vis, (new_width, new_height), 
+                                interpolation=cv2.INTER_LINEAR)
+        
+        # # 显示
+        # cv2.imshow("ROS Segmentation", cv2.cvtColor(im_vis_scaled, cv2.COLOR_RGB2BGR))
+        # cv2.waitKey(1)
+        
+        return im_vis  # 返回原始尺寸用于保存
+    
     def callback(self, rgb_msg, depth_msg):
         # --- 新增：只处理最新图像 ---
+        print("debug")
         if self.is_busy:
             return  # 如果上一帧还没处理完，直接跳过当前这一帧
         
@@ -144,132 +187,209 @@ class ROSSegmentationNode:
                 euler = tf.transformations.euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
                 theta = euler[2]  # yaw 角即为机器人当前的航向角 (单位: 弧度)
                 # 打印或使用坐标
-                rospy.loginfo(f"机器人底盘位姿: x={x:.2f}, y={y:.2f}, theta={theta/3.1415*180:.2f} degree")
+                print(f"机器人底盘位姿: x={x:.2f}, y={y:.2f}, theta={theta/3.1415*180:.2f} degree")
+            
+
+
+                # 2. 图像处理和语义分割
+                cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
+                img_ori = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+                H_ori, W_ori = img_ori.shape[:2]  # 720, 1280
+                # rospy.loginfo(f"原始图像尺寸: ({H_ori}, {W_ori})")
+                # 关键：16:9比例缩放（640x360），保证上采样后无变形
+                resize_size = (640, 360)
+                img_resized = cv2.resize(img_ori, resize_size, interpolation=cv2.INTER_LINEAR)
+                img_data = self.preprocess(img_resized)
+                with torch.no_grad():
+                    feed_dict = {'img_data': img_data.unsqueeze(0).cuda(self.gpu)}
+                    pred = self.segmentation_module(feed_dict, segSize=(H_ori, W_ori))
+                    _, pred = torch.max(pred, dim=1)
+                    pred = as_numpy(pred.squeeze(0).cpu())
+                # 生成sseg（720x1280，和原始图像/深度图对齐）
+                # 优化后代码（极快）：
+                pred_shifted = pred + 1  # 先做ID偏移（和原逻辑一致）
+                # 过滤超出映射数组范围的ID（避免索引越界）
+                pred_shifted_clipped = np.clip(pred_shifted, 0, len(self.id_mapping_array)-1)
+                # 数组索引映射（向量化操作，无循环）
+                sseg = self.id_mapping_array[pred_shifted_clipped]
+                sseg = sseg.astype(np.int32)
+                valid_mask = sseg != DEFAULT_NEW_IDX
+
+                # 3. 深度点云投影
+                depth_img = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
+                h, w = depth_img.shape
+                # sample_val = depth_img[h//2, w//2]  # 中心像素值
+                # rospy.loginfo(f"深度图中心像素值: {sample_val:.3f} 米 (编码: {depth_msg.encoding})")
+                # points_cam: (N, 3), u, v: (N,)
+                points_cam, u, v = self.pub3d.depth_to_pointcloud_camera(depth_img)
+                # print(f"点云范围: x[{points_cam[:,0].min():.3f}, {points_cam[:,0].max():.3f}], "
+                #             f"y[{points_cam[:,1].min():.3f}, {points_cam[:,1].max():.3f}], "
+                #             f"z[{points_cam[:,2].min():.3f}, {points_cam[:,2].max():.3f}]") 
+                # 将点云转换到 map 坐标系
+                trans_world_cam = torch.tensor([
+                    transform.transform.translation.x,
+                    transform.transform.translation.y,
+                    self.camera_height  #1.12
+                ], dtype=torch.float32, device=self.device)
+                # 旋转矩阵GPU化
+                quat = transform.transform.rotation
+                R_world_footprint = torch.tensor(
+                    tf.transformations.quaternion_matrix([quat.x, quat.y, quat.z, quat.w])[:3, :3],
+                    dtype=torch.float32, device=self.device
+                )
+                flag_cam_oritaion = 1
+                if flag_cam_oritaion == 1:  # 前置摄像头
+                    R_world_cam = R_world_footprint @ self.R_footprint_cam_front
+                elif flag_cam_oritaion == 2:  # 右侧摄像头
+                    R_world_cam = R_world_footprint @ self.R_footprint_cam_right
+                elif flag_cam_oritaion == 3:  # 左侧摄像头
+                    R_world_cam = R_world_footprint @ self.R_footprint_cam_left
+
+                # 点云转GPU+批量矩阵乘法（核心加速）
+                points_cam_tensor = torch.tensor(points_cam, dtype=torch.float32, device=self.device)
+                # 旋转：(N,3) @ (3,3).T → (N,3)（批量运算，无循环）
+                points_world_rot = points_cam_tensor @ R_world_cam.T
+                # 平移：广播相加
+                points_world_tensor = points_world_rot + trans_world_cam
+                # 转回CPU（仅最后一步）
+                points_world = points_world_tensor.cpu().numpy()
+                flag_rviz_3dpoint = False
+                if flag_rviz_3dpoint:
+                    # 发布点云到 RViz， 用于检查
+                    default_marker_id = 1
+                    if points_world.shape[0] > 10:
+                        # pc_msg = create_colored_pointcloud_ZHJD(points_world, color=(255, 0, 0), frame_id="map")
+                        # pc_pub.publish(pc_msg)
+                        self.pub3d.publish_marker_pointcloud(self.marker_pub, points_world, marker_id=default_marker_id, color=(1, 1, 0), scale=0.01)
+
+
+                # 4. 语义点云投影
+                local3D = points_world[np.newaxis, ...]  # shape: [1, N, 3]
+                local3D = torch.from_numpy(local3D).float().to("cuda")
+
+                points2D = np.stack((u, v), axis=-1)[np.newaxis, ...]  # shape: [1, N, 2]
+                points2D = torch.from_numpy(points2D).float().to("cuda")
+
+                # 有效点云对应的语义分割像素点
+                ssegs_3 = sseg[np.newaxis, np.newaxis, :, :]  # (1, 1, H, W)
+                ssegs_3 = torch.from_numpy(ssegs_3).float().to("cuda")
+
+                # 六、地面投影，构建单帧语义栅格地图
+                ego_semantic_sseg_27 = map_utils.ground_projection_ros(
+                    points2D, local3D, ssegs_3,
+                    sseg_labels=self.object_labels,
+                    grid_dim=self.grid_dim,
+                    cell_size=self.cell_size
+                )  # shape: [t, 27, 184, 184]
+                print("ego_semantic_sseg_27.shape: ", ego_semantic_sseg_27.shape)  #ego_semantic_sseg_27.shape:  torch.Size([1, 27, 200, 200])
+                # self.semantic_map_publisher.publish_semantic_map(ego_semantic_sseg_27, res=0.1, origin_x=-10.0, origin_y=-10.0, height=-0.5)
+
+                # # 七、累加到全局地图
+                geo_semantic_sseg = ego_semantic_sseg_27
+                step_geo_grid_sseg = self.sg.update_semantic_proj_grid_bayes(geo_grid=geo_semantic_sseg.unsqueeze(0))
+                # print("step_geo_grid_sseg.shape: ", step_geo_grid_sseg.shape)  step_geo_grid_sseg.shape:  torch.Size([1, 1, 27, 200, 200])
+
+                flag_rviz_2dmap = False
+                if flag_rviz_2dmap:
+                    self.semantic_map_publisher.async_publish_semantic_map(
+                        step_geo_grid_sseg.squeeze(0),  # 去掉批次维度，变成 [1, 27, 200, 200]
+                        res=0.1, 
+                        origin_x=-10.0, 
+                        origin_y=-10.0, 
+                        height=-0.5
+                    )
+
+                flag_save_global_map = True
+                if flag_save_global_map:
+                    viz_utils.save_only_Global_forROS(step_geo_grid_sseg, savepath=self.cfg.TEST.result, name=f"global_seq_{rgb_msg.header.seq}")
+
+
+                # 八、剪切到64x64的局部地图（以机器人为中心）
+                robot_ground_pose = [x,y,0]
+                step_ego_grid_sseg = self.sg.transform_global_to_ego_ros(grid=step_geo_grid_sseg.squeeze(0).squeeze(0), abs_pose=torch.tensor(robot_ground_pose).to(self.device))
+                step_ego_grid_crops = map_utils.crop_grid(grid=step_ego_grid_sseg, crop_size=self.crop_size)
+                step_ego_grid_crops = step_ego_grid_crops.squeeze(0)
+
+                flag_rviz_2d_ego_map = False
+                if flag_rviz_2d_ego_map:
+                    self.semantic_map_publisher.async_publish_semantic_map(
+                        step_ego_grid_crops.squeeze(0),  # 去掉批次维度，变成 [1, 27, 200, 200]
+                        res=0.1, 
+                        origin_x=-3.2, 
+                        origin_y=-3.2, 
+                        height=-0.5
+                    )
+                flag_save_2d_ego_map = False
+                if flag_save_2d_ego_map:
+                    step_ego_grid_27_single = viz_utils.colorEncode(step_ego_grid_crops.squeeze(0).argmax(axis=0))
+                    save_path = os.path.join(self.cfg.TEST.result, f"ground_seq_{rgb_msg.header.seq}.png")
+                    img = PILImage.fromarray(step_ego_grid_27_single)
+                    # 使用 NEAREST（最近邻）插值保持栅格边界清晰，或者 BILINEAR 使其平滑
+                    img = img.resize((500, 500), resample=PILImage.Resampling.NEAREST)
+                    img.save(save_path)
+                    print(f"✅ 语义预测图[{rgb_msg.header.seq}]已成功保存。")
+
+                
+
+
+                # # 发布 step_ego_grid_crops
+                step_ego_msg = StepEgoMapPose()
+                step_ego_msg.header = Header(stamp=rgb_msg.header.stamp, frame_id="map") 
+
+                # 填充 OccupancyGrid (step_ego_grid_27)
+                # item['step_ego_grid_27'] 是 Tensor(27, 64, 64)
+                grid_tensor = step_ego_grid_crops.squeeze(0)
+                # 转换为float32并展平
+                grid_np = grid_tensor.cpu().numpy().astype(np.float32)
+                # 将张量展平为列表
+                step_ego_msg.grid27 = Float32MultiArray()
+                step_ego_msg.grid27.data = grid_np.flatten().tolist()
+                C, H, W = grid_np.shape  # 27, 200, 200
+                step_ego_msg.grid27.layout.dim.clear()  # 清空默认维度
+                step_ego_msg.grid27.layout.dim.append(MultiArrayDimension(
+                    label="channels", size=C, stride=C * H * W
+                ))
+                step_ego_msg.grid27.layout.dim.append(MultiArrayDimension(
+                    label="height", size=H, stride=H * W
+                ))
+                step_ego_msg.grid27.layout.dim.append(MultiArrayDimension(
+                    label="width", size=W, stride=W
+                ))
+
+                # 直接传入数值即可
+                step_ego_msg.robot_pose = Float32()
+                robot_pose_array = [ Float32(x), Float32(y), Float32(0)]
+                step_ego_msg.robot_pose = robot_pose_array  # 给数组赋值
+
+            
+                self.step_ego_map_pose_pub.publish(step_ego_msg)
+                print(f"Published StepEgoMapPose message with grid shape: ({C}, {H}, {W}) and robot pose: ({x:.2f}, {y:.2f}, {theta/3.1415*180:.2f} degree)")
+
+                # --- 帧率计算逻辑 ---
+                curr_time = time.time()
+                dt = curr_time - self.prev_time
+
+                self.fps = 1.0 / dt if dt > 0 else 0.0
+                self.prev_time = curr_time
+                print(f"FPS: 【{self.fps:.2f}】 | Unique predictions: {np.unique(pred)} \n\n")
+
+                # 这里执行可视化逻辑...
+                flag_rviz_segmentation = False
+                if flag_rviz_segmentation:
+                    # pred_new = np.vectorize(lambda x: old_to_new_idx.get(x + 1, DEFAULT_NEW_IDX))(pred)
+                    # pred_color = colorEncode(pred_new, colors_27).astype(np.uint8)
+                    # im_vis = np.concatenate((img_ori, pred_color), axis=1)
+                    # cv2.imshow("ROS Segmentation", cv2.cvtColor(im_vis, cv2.COLOR_RGB2BGR))
+                    # cv2.waitKey(1)
+        
+                    pred_new = self.id_mapping_array[(pred + 1).clip(0, len(self.id_mapping_array)-1)]
+                    im_vis =self.visualize_with_scaled_display(img_ori, pred_new, 0.2)
+                    # 保存结果
+                    save_path = os.path.join(self.cfg.TEST.result, f"{rgb_msg.header.seq}.png")
+                    PILImage.fromarray(im_vis).save(save_path)
+
             except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
                 rospy.logwarn("TF lookup failed")
-
-
-            # 2. 图像处理和语义分割
-            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
-            img_ori = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-            H_ori, W_ori = img_ori.shape[:2]  # 720, 1280
-            rospy.loginfo(f"原始图像尺寸: ({H_ori}, {W_ori})")
-            # 关键：16:9比例缩放（640x360），保证上采样后无变形
-            resize_size = (640, 360)
-            img_resized = cv2.resize(img_ori, resize_size, interpolation=cv2.INTER_LINEAR)
-            img_data = self.preprocess(img_resized)
-            with torch.no_grad():
-                feed_dict = {'img_data': img_data.unsqueeze(0).cuda(self.gpu)}
-                pred = self.segmentation_module(feed_dict, segSize=(H_ori, W_ori))
-                _, pred = torch.max(pred, dim=1)
-                pred = as_numpy(pred.squeeze(0).cpu())
-            # 生成sseg（720x1280，和原始图像/深度图对齐）
-            # 优化后代码（极快）：
-            pred_shifted = pred + 1  # 先做ID偏移（和原逻辑一致）
-            # 过滤超出映射数组范围的ID（避免索引越界）
-            pred_shifted_clipped = np.clip(pred_shifted, 0, len(self.id_mapping_array)-1)
-            # 数组索引映射（向量化操作，无循环）
-            sseg = self.id_mapping_array[pred_shifted_clipped]
-            sseg = sseg.astype(np.int32)
-            valid_mask = sseg != DEFAULT_NEW_IDX
-
-            # 3. 深度点云投影
-            depth_img = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
-            h, w = depth_img.shape
-            # sample_val = depth_img[h//2, w//2]  # 中心像素值
-            # rospy.loginfo(f"深度图中心像素值: {sample_val:.3f} 米 (编码: {depth_msg.encoding})")
-            # points_cam: (N, 3), u, v: (N,)
-            points_cam, u, v = self.pub3d.depth_to_pointcloud_camera(depth_img)
-            # print(f"点云范围: x[{points_cam[:,0].min():.3f}, {points_cam[:,0].max():.3f}], "
-            #             f"y[{points_cam[:,1].min():.3f}, {points_cam[:,1].max():.3f}], "
-            #             f"z[{points_cam[:,2].min():.3f}, {points_cam[:,2].max():.3f}]") 
-            # 将点云转换到 map 坐标系
-            trans_world_cam = torch.tensor([
-                transform.transform.translation.x,
-                transform.transform.translation.y,
-                1.12
-            ], dtype=torch.float32, device=self.device)
-            # 旋转矩阵GPU化
-            quat = transform.transform.rotation
-            R_world_footprint = torch.tensor(
-                tf.transformations.quaternion_matrix([quat.x, quat.y, quat.z, quat.w])[:3, :3],
-                dtype=torch.float32, device=self.device
-            )
-            R_world_cam = R_world_footprint @ self.R_footprint_cam
-            # 点云转GPU+批量矩阵乘法（核心加速）
-            points_cam_tensor = torch.tensor(points_cam, dtype=torch.float32, device=self.device)
-            # 旋转：(N,3) @ (3,3).T → (N,3)（批量运算，无循环）
-            points_world_rot = points_cam_tensor @ R_world_cam.T
-            # 平移：广播相加
-            points_world_tensor = points_world_rot + trans_world_cam
-            # 转回CPU（仅最后一步）
-            points_world = points_world_tensor.cpu().numpy()
-            flag_rviz_3dpoint = False
-            if flag_rviz_3dpoint:
-                # 发布点云到 RViz， 用于检查
-                default_marker_id = 1
-                if points_world.shape[0] > 10:
-                    # pc_msg = create_colored_pointcloud_ZHJD(points_world, color=(255, 0, 0), frame_id="map")
-                    # pc_pub.publish(pc_msg)
-                    self.pub3d.publish_marker_pointcloud(self.marker_pub, points_world, marker_id=default_marker_id, color=(1, 1, 0), scale=0.01)
-
-
-            # 4. 语义点云投影
-            local3D = points_world[np.newaxis, ...]  # shape: [1, N, 3]
-            local3D = torch.from_numpy(local3D).float().to("cuda")
-
-            points2D = np.stack((u, v), axis=-1)[np.newaxis, ...]  # shape: [1, N, 2]
-            points2D = torch.from_numpy(points2D).float().to("cuda")
-
-            # 有效点云对应的语义分割像素点
-            ssegs_3 = sseg[np.newaxis, np.newaxis, :, :]  # (1, 1, H, W)
-            ssegs_3 = torch.from_numpy(ssegs_3).float().to("cuda")
-
-            # 六、地面投影，构建单帧语义栅格地图
-            ego_semantic_sseg_27 = map_utils.ground_projection_ros(
-                points2D, local3D, ssegs_3,
-                sseg_labels=self.object_labels,
-                grid_dim=self.grid_dim,
-                cell_size=self.cell_size
-            )  # shape: [t, 27, 184, 184]
-            # print("ego_semantic_sseg_27.shape: ", ego_semantic_sseg_27.shape)  ego_semantic_sseg_27.shape:  torch.Size([1, 27, 200, 200])
-            # self.semantic_map_publisher.publish_semantic_map(ego_semantic_sseg_27, res=0.1, origin_x=-10.0, origin_y=-10.0, height=-0.5)
-
-            # # 七、累加到全局地图
-            geo_semantic_sseg = ego_semantic_sseg_27
-            step_geo_grid_sseg = self.sg.update_semantic_proj_grid_bayes(geo_grid=geo_semantic_sseg.unsqueeze(0))
-            # print("step_geo_grid_sseg.shape: ", step_geo_grid_sseg.shape)  step_geo_grid_sseg.shape:  torch.Size([1, 1, 27, 200, 200])
-
-            flag_rviz_2dmap = False
-            if flag_rviz_2dmap:
-                self.semantic_map_publisher.async_publish_semantic_map(
-                    step_geo_grid_sseg.squeeze(0),  # 去掉批次维度，变成 [1, 27, 200, 200]
-                    res=0.1, 
-                    origin_x=-10.0, 
-                    origin_y=-10.0, 
-                    height=-0.5
-                )
-
-
-
-
-            # --- 帧率计算逻辑 ---
-            curr_time = time.time()
-            dt = curr_time - self.prev_time
-
-            self.fps = 1.0 / dt if dt > 0 else 0.0
-            self.prev_time = curr_time
-            print(f"FPS: 【{self.fps:.2f}】 | Unique predictions: {np.unique(pred)} \n\n")
-
-            # # 这里执行可视化逻辑...
-            
-            # pred_color = colorEncode(pred_new, colors_27).astype(np.uint8)
-            # im_vis = np.concatenate((img_ori, pred_color), axis=1)
-            # # cv2.imshow("ROS Segmentation", cv2.cvtColor(im_vis, cv2.COLOR_RGB2BGR))
-            # # cv2.waitKey(1)
-            # # 保存结果
-            # save_path = os.path.join(self.cfg.TEST.result, f"{rgb_msg.header.seq}.png")
-            # PILImage.fromarray(im_vis).save(save_path)
 
         except Exception as e:
             rospy.logerr(f"Inference error: {e}")
@@ -279,6 +399,8 @@ class ROSSegmentationNode:
             self.is_busy = False 
             # 如果你依然怀疑内存占用，可以在这里加上清理：
             # torch.cuda.empty_cache()
+
+    
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

@@ -53,7 +53,9 @@ echo "编码器: $ENCODER"
 echo "解码器: $DECODER"
 
 # 设置结果保存目录
-RESULT_DIR="./save_results/ros_segmentation_online"
+# RESULT_DIR="./save_results/ros_segmentation_online_7floor_global"
+RESULT_DIR="./save_results/ros_segmentation_online_ruihai_global"
+# RESULT_DIR="/media/robotlab/WD_BLACK1/ros_segment/ros_segmentation_online_7floor"
 if [ ! -d $RESULT_DIR ]; then
   mkdir -p $RESULT_DIR
   echo "创建结果保存目录: $RESULT_DIR"

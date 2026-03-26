@@ -1,3 +1,30 @@
+#  处理，生成step.bag
+bash ros_test.sh 
++ 7楼的rosbag位置   1
+  + 原数据：/media/robotlab/WD_BLACK1/7_floor/12$ rosbag play 2026-03-13-02-45-21.bag  --clock 
+  + 投影地图： ~/dataset/7floor/rosbag/step_7floor.bag
++ 7楼的rosbag位置   2
+  + front-map-tf-step.bag  集成了     /map  /step_ego_map_pose  /tf     
+  + rosbag play  front-map-tf-step.bag --clock
+
++ ruihai
+
+#  7 floor
+bash rviz.sh    # 用的这个的rviz界面
+启动底盘
+roslaunch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch  # 可能是不用启动这个
+rosparam set use_sim_time true   # 包括机械臂的窗口也要输入这个
+rosbag play 2026-03-18-08-59-16.bag --clock   # --clock是关键
+rosbag play /home/robotlab/dataset/ruihai_charpt5/step.bag
+
+
+#  瑞海
+roslaunch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch  # 可能是不用启动这个
+rosparam set use_sim_time true   # 包括机械臂的窗口也要输入这个
+rosbag play 2026-03-18-08-59-16.bag --clock   # --clock是关键
+rosbag play /home/robotlab/dataset/ruihai_charpt5/step.bag
+
+
 # 安装方法
   <!-- + conda create -n seg_torch_env python=3.9 -y
   + conda activate seg_torch_env
